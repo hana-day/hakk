@@ -7,10 +7,13 @@
 //!
 //! Recovery tools:
 //! - `naive`: our minimal baseline carver (`carver::naive`)
+//! - `fs`: file system analysis (`crates/fs`; see `fs_tool`)
 //! - `photorec`: run as an external command if `photorec` is on PATH
 
 // A development tool handling small values; truncation lints are noise here.
 #![allow(clippy::cast_possible_truncation)]
+
+mod fs_tool;
 
 use std::{
     fs,
@@ -91,6 +94,8 @@ fn bench(args: &[String]) -> Result<()> {
         naive(&image, &out)?;
         let elapsed = started.elapsed().as_secs_f64();
         reports.push(evaluate(&bin, &manifest, &out, "naive", elapsed, &dir)?);
+
+        reports.push(fs_tool::run(&bin, &image, &manifest, &dir)?);
 
         if let Some(photorec) = &photorec {
             let out = dir.join("photorec");

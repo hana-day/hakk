@@ -10,6 +10,8 @@ publish.workspace = true
 anyhow = "1.0.104"
 blocksource = { path = "../../crates/blocksource" }
 carver = { path = "../../crates/carver" }
+# The crate is named `fs`; renamed so it does not shadow `std::fs` here.
+hakk-fs = { package = "fs", path = "../../crates/fs" }
 serde_json = "1.0.151"
 
 [lints]

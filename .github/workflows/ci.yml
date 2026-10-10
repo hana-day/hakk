@@ -67,6 +67,9 @@ jobs:
         run: cargo test -p blocksource --test device_linux -- --ignored
       - if: runner.os == 'Windows'
         run: cargo test -p blocksource --test device_windows -- --ignored
+      # FAT12/16/32 and exFAT volumes written (and partly deleted) by the macOS drivers.
+      - if: runner.os == 'macOS'
+        run: cargo test -p fs --test macos_driver -- --ignored
 
   ui:
     name: ui (type check / test / build)
