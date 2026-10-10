@@ -17,6 +17,18 @@ allow = [
 ]
 confidence-threshold = 0.9
 
+# Crate-specific exceptions. Each one is pulled in by Tauri and cannot be removed.
+# MPL-2.0 is file-level copyleft: obligations apply only to these crates' own files.
+exceptions = [
+    # tauri-utils / wry -> dom_query (HTML parsing for CSP injection)
+    { allow = ["MPL-2.0"], crate = "cssparser" },
+    { allow = ["MPL-2.0"], crate = "cssparser-macros" },
+    { allow = ["MPL-2.0"], crate = "selectors" },
+    { allow = ["MPL-2.0"], crate = "dtoa-short" },
+    # tauri -> dirs -> dirs-sys
+    { allow = ["MPL-2.0"], crate = "option-ext" },
+]
+
 [licenses.private]
 # Our own crates (publish = false) have no license field and are not checked.
 ignore = true
@@ -29,6 +41,11 @@ allow-wildcard-paths = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+    # proc-macro-error is unmaintained. Pulled in on Linux by Tauri's GTK bindings
+    # (gtk-rs 0.18 via muda); it is a build-time proc macro only.
+    { id = "RUSTSEC-2024-0370", reason = "Tauri's GTK dependency; no maintained alternative in Tauri 2" },
+]
 
 [sources]
 unknown-registry = "deny"
