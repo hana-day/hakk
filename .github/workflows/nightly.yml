@@ -30,6 +30,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y exfatprogs testdisk "linux-modules-extra-$(uname -r)"
           sudo modprobe exfat
+      # Windows sends TRIM to the whole volume on format, and the VHD driver zeroes those
+      # ranges, unlike SD cards and HDDs. Disable delete notifications on this throwaway VM.
+      - if: runner.os == 'Windows'
+        run: fsutil behavior set DisableDeleteNotify 1
       - if: runner.os == 'macOS'
         run: brew install testdisk
       # Every scenario, including the large ones.
