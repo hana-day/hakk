@@ -1,0 +1,38 @@
+# 断片化：隙間だらけのディスクに書き足したファイル（断片化する）を削除する
+name = "fragmented"
+seed = 3
+size = "64MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 50
+min_size = "100KiB"
+max_size = "600KiB"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+# 隙間より大きいファイルを書くと、複数の隙間に分かれて置かれる
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 8
+min_size = "800KiB"
+max_size = "1500KiB"
+dir = "DCIM/101HAKK"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+count = 2
+min_size = "1MiB"
+max_size = "3MiB"
+dir = "DCIM/101HAKK"
+
+[[steps]]
+op = "delete"
+fraction = 0.6
+dir = "DCIM/101HAKK"

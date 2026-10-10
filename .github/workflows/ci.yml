@@ -43,8 +43,8 @@ jobs:
       - if: runner.os == 'macOS'
         run: cargo test -p blocksource --test device_macos -- --ignored
 
-  scenario:
-    name: scenario (${{ matrix.os }})
+  bench:
+    name: bench (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -53,16 +53,22 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
+      # ランナーのカーネルには exFAT ドライバが標準で入っていないので、追加モジュールから読み込む
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y exfatprogs
-      - run: cargo build -p hakk-scenario --release
-      - name: シナリオからイメージと正解マニフェストを生成
-        shell: bash
         run: |
-          for s in scenarios/*.toml; do
-            ./target/release/hakk-scenario "$s" "work/$(basename "$s" .toml)"
-          done
+          sudo apt-get update
+          sudo apt-get install -y exfatprogs "linux-modules-extra-$(uname -r)"
+          sudo modprobe exfat
+      - if: runner.os == 'macOS'
+        run: brew install testdisk
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y testdisk
+      # シナリオからイメージを生成し、自作の最小カーバーと PhotoRec で復元して採点する
+      - run: cargo xtask bench
       - uses: actions/upload-artifact@v4
         with:
-          name: manifests-${{ matrix.os }}
-          path: work/*/manifest.json
+          name: bench-${{ matrix.os }}
+          path: |
+            work/bench/summary.json
+            work/bench/*/manifest.json
+            work/bench/*/*.json

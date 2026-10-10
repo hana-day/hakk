@@ -40,6 +40,9 @@ pub enum Step {
     Delete {
         /// 残っているファイルのうち削除する割合（0.0〜1.0）。
         fraction: f64,
+        /// 指定すると、このフォルダ（の下）にあるファイルだけから選ぶ。
+        #[serde(default)]
+        dir: Option<String>,
     },
     /// クイックフォーマット（全ファイルが削除扱いになる）。
     Format,
@@ -82,7 +85,7 @@ impl Scenario {
                         bail!("steps[{i}]: min_size は 4KiB 以上にする（配置の特定に必要）");
                     }
                 }
-                Step::Delete { fraction } => {
+                Step::Delete { fraction, .. } => {
                     if !(0.0..=1.0).contains(fraction) {
                         bail!("steps[{i}]: fraction は 0.0〜1.0");
                     }

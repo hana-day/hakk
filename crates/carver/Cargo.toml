@@ -1,0 +1,13 @@
+[package]
+name = "carver"
+description = "カービング：生データからファイル固有のバイト列を探して切り出す"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blocksource = { path = "../blocksource" }
+
+[lints]
+workspace = true

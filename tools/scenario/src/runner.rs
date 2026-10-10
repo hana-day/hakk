@@ -75,9 +75,17 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                     f.entry.fragmented = f.entry.extents.as_ref().is_some_and(|e| e.len() > 1);
                 }
             }
-            Step::Delete { fraction } => {
+            Step::Delete { fraction, dir } => {
+                let in_dir = |path: &str| {
+                    dir.as_ref()
+                        .is_none_or(|d| path.starts_with(&format!("{}/", d.trim_end_matches('/'))))
+                };
                 let mut live: Vec<usize> = (0..files.len())
-                    .filter(|&i| files.get(i).is_some_and(|f| f.entry.deleted_at.is_none()))
+                    .filter(|&i| {
+                        files
+                            .get(i)
+                            .is_some_and(|f| f.entry.deleted_at.is_none() && in_dir(&f.entry.path))
+                    })
                     .collect();
                 rng.shuffle(&mut live);
                 let n = (live.len() as f64 * fraction).round() as usize;

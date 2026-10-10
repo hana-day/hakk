@@ -21,3 +21,15 @@ GPLのソースを参考にした場合は、仕組みを**コードを含まな
 | JPEG のセグメント構造（SOI、APPn、COM） | ITU-T T.81 Annex B |
 | MP4 の box 構造（ftyp / mdat / moov、stbl の各表） | ISO/IEC 14496-12（ISO BMFF） |
 | AVC のサンプルエントリ（avc1 / avcC）、長さ付き NAL 単位 | ISO/IEC 14496-15 |
+
+## carver
+
+| 内容 | 資料 |
+|---|---|
+| 最小限の JPEG カービング（SOI `FF D8 FF` から最初の EOI `FF D9` まで） | ITU-T T.81 Annex B |
+
+## 比較対象としての PhotoRec（コードは取り込まない）
+
+| 内容 | 資料 |
+|---|---|
+| `/cmd` による非対話実行の指定（`partition_none`、`fileopt`、`everything`、`enable` / `disable`、`wholespace`、`search`） | testdisk 7.2 のソースのコマンド行解析部分（`src/phcli.c`、`src/partnone.c`）。起動方法の確認のみ |

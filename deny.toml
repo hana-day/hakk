@@ -24,6 +24,8 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# ワークスペース内のパス指定の依存（publish = false）はワイルドカードとみなさない
+allow-wildcard-paths = true
 
 [advisories]
 yanked = "deny"
