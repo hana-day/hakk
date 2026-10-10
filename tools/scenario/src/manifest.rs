@@ -19,6 +19,8 @@ pub struct Manifest {
     /// マニフェストからの相対パス。
     pub image: String,
     pub image_size: u64,
+    /// ファイルシステムの開始位置（区画表があれば最初の区画の位置）。
+    pub partition_offset: u64,
     /// ファイルシステムのクラスタサイズ（ブートセクタから読んだもの）。
     pub cluster_size: Option<u64>,
     /// イメージを作った環境（OS ドライバによって配置が変わるため記録する）。

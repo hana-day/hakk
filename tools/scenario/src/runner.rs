@@ -29,14 +29,10 @@ struct Tracked {
 
 pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
     fs::create_dir_all(out_dir)?;
-    let image = out_dir.join(IMAGE_NAME);
-    // 中身ゼロの疎なファイル（ディスクを使い切らない）
-    File::create(&image)?.set_len(sc.size.0)?;
-
     let backend = backend::native()?;
     let mut rng = Rng::new(sc.seed);
     let label = format!("HK{:08X}", rng.next_u64() as u32);
-    backend.format(&image, sc.fs, &label)?;
+    let image = backend.create(out_dir, sc.size.0, sc.fs, &label)?;
 
     let mut files: Vec<Tracked> = Vec::new();
     for (step_no, step) in sc.steps.iter().enumerate() {
@@ -68,7 +64,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                     Ok(())
                 })?;
                 // 書き込んだ直後の配置を記録する
-                let snapshot = fs::read(&image)?;
+                let snapshot = backend::read_disk(&image, sc.size.0)?;
                 let index = Index::new(&snapshot);
                 for f in files.iter_mut().skip(first_new) {
                     f.entry.extents = index.locate(&f.bytes);
@@ -112,7 +108,9 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
     }
 
     // 最終イメージで、どれだけ元の中身が残っているか
-    let final_image = fs::read(&image)?;
+    let final_image = backend::read_disk(&image, sc.size.0)?;
+    fs::write(out_dir.join(IMAGE_NAME), &final_image)?;
+    fs::remove_file(&image)?;
     for f in &mut files {
         if let Some(ext) = &f.entry.extents {
             f.entry.intact_bytes = locate::intact_bytes(&final_image, &f.bytes, ext);
@@ -126,6 +124,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
         fs: sc.fs,
         image: IMAGE_NAME.to_owned(),
         image_size: sc.size.0,
+        partition_offset: partition_offset(&final_image),
         cluster_size: exfat_cluster_size(&final_image),
         generator: generator(),
         files: files.into_iter().map(|f| f.entry).collect(),
@@ -171,14 +170,33 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// ファイルシステムの開始位置。区画表が無ければ 0、MBR なら最初の区画の位置。
+/// 参考：MBR の区画表（オフセット 446 から 16 バイト×4、開始 LBA はエントリの +8）。
+fn partition_offset(image: &[u8]) -> u64 {
+    let is_vbr = |at: usize| image.get(at + 3..at + 11) == Some(b"EXFAT   ".as_slice());
+    if is_vbr(0) {
+        return 0;
+    }
+    let lba = image
+        .get(446 + 8..446 + 12)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(0, u32::from_le_bytes);
+    if image.get(510..512) == Some([0x55, 0xAA].as_slice()) && lba > 0 {
+        u64::from(lba) * 512
+    } else {
+        0
+    }
+}
+
 /// exFAT のブートセクタからクラスタサイズを読む。
 /// 参考：Microsoft "exFAT file system specification" 3.1.14 BytesPerSectorShift / 3.1.15 SectorsPerClusterShift。
 fn exfat_cluster_size(image: &[u8]) -> Option<u64> {
-    if image.get(3..11)? != b"EXFAT   " {
+    let vbr = image.get(usize::try_from(partition_offset(image)).ok()?..)?;
+    if vbr.get(3..11)? != b"EXFAT   " {
         return None;
     }
-    let bps = u32::from(*image.get(108)?);
-    let spc = u32::from(*image.get(109)?);
+    let bps = u32::from(*vbr.get(108)?);
+    let spc = u32::from(*vbr.get(109)?);
     1u64.checked_shl(bps.checked_add(spc)?)
 }
 

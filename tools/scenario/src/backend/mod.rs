@@ -2,17 +2,20 @@
 //!
 //! - macOS：`hdiutil` ＋ `newfs_exfat`（管理者権限不要）
 //! - Linux：`mkfs.exfat` ＋ ループバックマウント（`sudo` が必要。CI 用）
-//! - Windows：未対応（毎晩の CI で VHD を使う予定）
-
-// 未対応の OS では実装がなく、共通の補助関数が使われない
-#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+//! - Windows：固定サイズの VHD ＋ `Mount-DiskImage`（管理者権限が必要。MBR の区画を1つ作る）
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod windows;
 
-use std::{path::Path, process::Command};
+use std::{
+    fs::{self, File},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, bail};
 
@@ -20,6 +23,17 @@ use crate::scenario::FsKind;
 
 /// イメージファイルにファイルシステムを作り、マウントする手段。
 pub trait Backend {
+    /// `dir` に大きさ `size` の空のディスクを作り、ファイルシステムを作る。
+    /// 以後の操作に使う作業用ファイルを返す。その先頭 `size` バイトがディスクの中身になる
+    /// （VHD のように末尾に管理情報が付く形式もあるため）。
+    fn create(&self, dir: &Path, size: u64, fs: FsKind, label: &str) -> Result<PathBuf> {
+        let image = dir.join("work.img");
+        // 中身ゼロの疎なファイル（ディスクを使い切らない）
+        File::create(&image)?.set_len(size)?;
+        self.format(&image, fs, label)?;
+        Ok(image)
+    }
+
     /// クイックフォーマットする（既存のデータ領域は消さない）。
     fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()>;
     fn mount(&self, image: &Path) -> Result<Box<dyn Mounted>>;
@@ -38,10 +52,19 @@ pub fn native() -> Result<Box<dyn Backend>> {
     return Ok(Box::new(macos::Hdiutil));
     #[cfg(target_os = "linux")]
     return Ok(Box::new(linux::Loop));
+    #[cfg(windows)]
+    return Ok(Box::new(windows::Vhd));
     #[allow(unreachable_code)]
     {
-        bail!("この OS にはまだ対応していない（macOS と Linux のみ）")
+        bail!("この OS には対応していない")
     }
+}
+
+/// 作業用ファイルからディスクの中身（先頭 `size` バイト）を読む。
+pub fn read_disk(image: &Path, size: u64) -> Result<Vec<u8>> {
+    let mut data = fs::read(image).with_context(|| format!("{} を読めない", image.display()))?;
+    data.truncate(usize::try_from(size)?);
+    Ok(data)
 }
 
 /// コマンドを実行して標準出力を返す。失敗したら標準エラーを含めて報告する。
