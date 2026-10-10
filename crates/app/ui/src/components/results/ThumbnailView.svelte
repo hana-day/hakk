@@ -26,7 +26,7 @@
 
   function sub(g: Group): string {
     if (g.source.type === 'folder') {
-      // The volume name is the drive the user picked; show the folders below it.
+      // The volume is on the drive the user picked; show the folders below it.
       return g.source.folders.slice(1).join(t('results.folderSeparator')) || (g.source.folders[0] ?? '');
     }
     return g.source.namedFromMetadata ? t('results.carvedNamed') : t('results.carved');

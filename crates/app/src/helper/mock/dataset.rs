@@ -6,8 +6,8 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use hakk_protocol::{
-    Destination, DestinationBlock, DestinationId, Drive, DriveId, DriveKind, DriveWarning,
-    FileKind, FileOrigin, FileStatus, HiddenReason, RepairMethod,
+    Confidence, Destination, DestinationBlock, DestinationId, Drive, DriveId, DriveKind,
+    DriveWarning, FileKind, FileOrigin, FileStatus, HiddenReason, RepairMethod, VolumeRef,
 };
 
 const GB: u64 = 1_000_000_000;
@@ -290,6 +290,7 @@ pub struct PlannedFile {
     pub size: u64,
     pub captured_at: Option<String>,
     pub duration_seconds: Option<u32>,
+    pub confidence: Confidence,
     pub hidden: Option<HiddenReason>,
     pub reveal: Reveal,
     /// Status after verification.
@@ -352,8 +353,20 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
                 kind,
                 name,
                 origin: FileOrigin::FileSystem {
-                    folders: folder.path.iter().map(|s| (*s).to_owned()).collect(),
+                    volume: VolumeRef {
+                        index: 0,
+                        label: folder.path.first().map(|s| (*s).to_owned()),
+                    },
+                    folders: folder
+                        .path
+                        .iter()
+                        .skip(1)
+                        .map(|s| (*s).to_owned())
+                        .collect(),
+                    // A few deleted short names lost their first letter.
+                    name_exact: rng.unit() >= 0.02,
                 },
+                confidence: confidence_for(status),
                 offset,
                 size,
                 captured_at: Some(datetime(day, seconds)),
@@ -431,6 +444,7 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
             origin: FileOrigin::Carved {
                 named_from_metadata: named,
             },
+            confidence: Confidence::High,
             offset: {
                 let region = regions.get(rng.range(0, CARVED_REGIONS) as usize);
                 let (start, len) = region.copied().unwrap_or((total / 100, total / 40));
@@ -473,6 +487,15 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
     carved.sort_by_key(|f| f.offset);
     out.extend(carved);
     out
+}
+
+/// Placement confidence consistent with the verification result the file will get.
+fn confidence_for(status: FileStatus) -> Confidence {
+    match status {
+        FileStatus::PartiallyDamaged => Confidence::Low,
+        FileStatus::IndexMissing | FileStatus::Unknown => Confidence::Medium,
+        FileStatus::Recoverable | FileStatus::Repaired => Confidence::High,
+    }
 }
 
 /// Verification result for a file; carved files are damaged more often.

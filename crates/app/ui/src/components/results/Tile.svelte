@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { FoundFile } from '../../lib/bindings/FoundFile';
-  import { badgeClass, tone } from '../../lib/display';
+  import { displayName, statusBadge, tone } from '../../lib/display';
   import { formatBytes, formatClock } from '../../lib/format';
   import { t } from '../../lib/i18n';
   import Icon from '../Icon.svelte';
@@ -10,6 +10,8 @@
     selected,
     ontoggle,
   }: { file: FoundFile; selected: boolean; ontoggle: (id: number) => void } = $props();
+
+  const badge = $derived(statusBadge(file));
 </script>
 
 <button type="button" class="tile" class:on={selected} aria-pressed={selected} onclick={() => ontoggle(file.id)}>
@@ -24,9 +26,9 @@
     {/if}
   </span>
   <span class="meta">
-    <span class="name">{file.name}</span>
+    <span class="name" title={displayName(file)}>{displayName(file)}</span>
     <span class="row">
-      <span class={badgeClass(file.status)}>{t(`status.${file.status}`)}</span>
+      <span class={badge.className}>{badge.text}</span>
       <span class="num size">{formatBytes(file.size)}</span>
     </span>
   </span>

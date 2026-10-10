@@ -182,11 +182,38 @@ pub enum FileKind {
 )]
 pub enum FileOrigin {
     /// From file system metadata. The name and folders are the original ones.
-    /// `folders` starts with the volume name, e.g. `["EOS_DIGITAL", "DCIM", "100CANON"]`.
-    FileSystem { folders: Vec<String> },
+    FileSystem {
+        volume: VolumeRef,
+        /// Folders below the volume root, e.g. `["DCIM", "100CANON"]`.
+        folders: Vec<String>,
+        /// `false` when part of the name was lost and guessed (the first character of a
+        /// deleted FAT short name), so the name is shown as a guess.
+        name_exact: bool,
+    },
     /// Carved from raw data. The name was generated from embedded metadata (capture time and
     /// camera model) when available, or is a sequential placeholder.
     Carved { named_from_metadata: bool },
+}
+
+/// A volume (partition) on the scanned drive. The GUI shows the label, or a numbered
+/// placeholder when the volume has none.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct VolumeRef {
+    /// Zero-based position of the partition on the drive.
+    pub index: u32,
+    pub label: Option<String>,
+}
+
+/// How likely a file's data is still intact, judged from where it lies on the disk before
+/// its content is verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum Confidence {
+    High,
+    Medium,
+    /// Some of its space now belongs to other data; the content is probably overwritten.
+    Low,
 }
 
 /// Result of verifying a found file. Updated as verification progresses.
@@ -240,6 +267,7 @@ pub struct FoundFile {
     pub captured_at: Option<String>,
     /// Length of a video.
     pub duration_seconds: Option<u32>,
+    pub confidence: Confidence,
     pub status: FileStatus,
     pub hidden: Option<HiddenReason>,
     /// Repair offered for this file, if any.
@@ -423,6 +451,23 @@ mod tests {
         assert_eq!(
             json,
             r#"{"type":"filesMerged","scanId":1,"merges":[{"from":2,"into":3}]}"#
+        );
+    }
+
+    #[test]
+    fn origin_fields_are_camel_case() {
+        let origin = FileOrigin::FileSystem {
+            volume: VolumeRef {
+                index: 0,
+                label: None,
+            },
+            folders: vec!["DCIM".into()],
+            name_exact: false,
+        };
+        let json = serde_json::to_string(&origin).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"fileSystem","volume":{"index":0,"label":null},"folders":["DCIM"],"nameExact":false}"#
         );
     }
 

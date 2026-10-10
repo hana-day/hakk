@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { FoundFile } from '../../lib/bindings/FoundFile';
   import type { RepairMethod } from '../../lib/bindings/RepairMethod';
-  import { badgeClass, tone } from '../../lib/display';
+  import { displayName, statusBadge, tone } from '../../lib/display';
   import { formatBytes, formatClock, formatDateTime } from '../../lib/format';
   import { t } from '../../lib/i18n';
   import Icon from '../Icon.svelte';
@@ -55,6 +55,7 @@
     <tbody>
       {#each files as f (f.id)}
         {@const on = selection.has(f.id)}
+        {@const badge = statusBadge(f)}
         <tr class:on onclick={() => ontoggle(f.id)}>
           <td class="check">
             <input
@@ -68,13 +69,13 @@
           <td>
             <span class="name">
               <span class="thumb" style:background-color={tone(f.id)}></span>
-              <span class="num mono">{f.name}</span>
+              <span class="num mono">{displayName(f)}</span>
             </span>
           </td>
           <td class="date">{f.capturedAt === null ? t('list.unknownDate') : formatDateTime(f.capturedAt)}</td>
           <td class="num mono">{f.durationSeconds === null ? t('list.noDuration') : formatClock(f.durationSeconds)}</td>
           <td class="num mono right">{formatBytes(f.size)}</td>
-          <td><span class={badgeClass(f.status)}>{t(`status.${f.status}`)}</span></td>
+          <td><span class={badge.className}>{badge.text}</span></td>
           <td class="last">
             {#if f.repair !== null}
               {@const method = f.repair}

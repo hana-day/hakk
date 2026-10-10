@@ -2,6 +2,7 @@
 import type { Drive } from './bindings/Drive';
 import type { DriveKind } from './bindings/DriveKind';
 import type { FileStatus } from './bindings/FileStatus';
+import type { FoundFile } from './bindings/FoundFile';
 import { isHelperError } from './api';
 import { formatBytes } from './format';
 import { t } from './i18n';
@@ -39,6 +40,21 @@ export function badgeClass(status: FileStatus): string {
     case 'unknown':
       return 'badge badge-neutral';
   }
+}
+
+/** Badge for a file: its verification status, or a warning while an unverified file
+ *  probably lies in overwritten space. */
+export function statusBadge(file: FoundFile): { text: string; className: string } {
+  if (file.status === 'unknown' && file.confidence === 'low') {
+    return { text: t('status.likelyOverwritten'), className: 'badge badge-warn' };
+  }
+  return { text: t(`status.${file.status}`), className: badgeClass(file.status) };
+}
+
+/** File name, marked when part of it was guessed. */
+export function displayName(file: FoundFile): string {
+  const guessed = file.origin.type === 'fileSystem' && !file.origin.nameExact;
+  return guessed ? t('results.guessedName', { name: file.name }) : file.name;
 }
 
 // Placeholder thumbnail colors until real previews exist.

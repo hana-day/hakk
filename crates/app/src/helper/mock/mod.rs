@@ -637,6 +637,7 @@ impl Scan {
             size: plan.size,
             captured_at: plan.captured_at.clone(),
             duration_seconds: plan.duration_seconds,
+            confidence: plan.confidence,
             status: FileStatus::Unknown,
             hidden: plan.hidden,
             repair: None,

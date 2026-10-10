@@ -2,6 +2,8 @@
 import type { FileKind } from './bindings/FileKind';
 import type { FileStatus } from './bindings/FileStatus';
 import type { FoundFile } from './bindings/FoundFile';
+import type { VolumeRef } from './bindings/VolumeRef';
+import { t } from './i18n';
 
 /** Which part of the results the sidebar points at. */
 export type Scope =
@@ -24,6 +26,18 @@ export function isRecoverable(status: FileStatus): boolean {
   return status === 'recoverable' || status === 'repaired';
 }
 
+/** Name shown for a volume: its label, or a numbered placeholder when it has none. */
+export function volumeName(volume: VolumeRef): string {
+  return volume.label ?? t('results.volume', { n: volume.index + 1 });
+}
+
+/** Folder path of a file found through the file system, starting with the volume name;
+ *  null for carved files. */
+export function folderPath(file: FoundFile): string[] | null {
+  if (file.origin.type !== 'fileSystem') return null;
+  return [volumeName(file.origin.volume), ...file.origin.folders];
+}
+
 function startsWith(folders: readonly string[], prefix: readonly string[]): boolean {
   return prefix.length <= folders.length && prefix.every((name, i) => folders[i] === name);
 }
@@ -33,12 +47,14 @@ export function inScope(file: FoundFile, scope: Scope, deep = true): boolean {
   switch (scope.type) {
     case 'all':
       return true;
-    case 'folder':
+    case 'folder': {
+      const path = folderPath(file);
       return (
-        file.origin.type === 'fileSystem' &&
-        startsWith(file.origin.folders, scope.path) &&
-        (deep || file.origin.folders.length === scope.path.length)
+        path !== null &&
+        startsWith(path, scope.path) &&
+        (deep || path.length === scope.path.length)
       );
+    }
     case 'carved':
       return file.origin.type === 'carved' && file.kind === scope.kind;
   }
@@ -99,10 +115,14 @@ export function groupByDay(sorted: FoundFile[]): Group[] {
   const groups = new Map<string, Group>();
   for (const file of sorted) {
     const day = file.capturedAt?.slice(0, 10) ?? null;
+    const path = folderPath(file);
     const source: GroupSource =
-      file.origin.type === 'fileSystem'
-        ? { type: 'folder', folders: file.origin.folders }
-        : { type: 'carved', namedFromMetadata: file.origin.namedFromMetadata };
+      path !== null
+        ? { type: 'folder', folders: path }
+        : {
+            type: 'carved',
+            namedFromMetadata: file.origin.type === 'carved' && file.origin.namedFromMetadata,
+          };
     const sourceKey =
       source.type === 'folder' ? `f:${source.folders.join('/')}` : `c:${source.namedFromMetadata}`;
     const key = `${day ?? '-'}|${sourceKey}`;
@@ -128,8 +148,8 @@ export interface FolderRow {
 export function folderTree(files: FoundFile[]): FolderRow[] {
   const counts = new Map<string, { path: string[]; count: number }>();
   for (const file of files) {
-    if (file.origin.type !== 'fileSystem') continue;
-    const folders = file.origin.folders;
+    const folders = folderPath(file);
+    if (folders === null) continue;
     for (let depth = 1; depth <= folders.length; depth++) {
       const path = folders.slice(0, depth);
       const key = path.join('\u0000');

@@ -126,6 +126,8 @@ export const ja = {
     carvedNamed: 'ファイル名なし · 撮影情報から命名',
     carved: 'ファイル名なし',
     folderSeparator: ' / ',
+    volume: 'パーティション {n}',
+    guessedName: '{name}（名前は推測）',
     empty: '条件に合うファイルはありません',
     emptyScanning: 'まだ見つかっていません。見つかりしだい、ここに表示します。',
     hiddenNote: '小さな画像やキャッシュなど {count} 件を隠しています',
@@ -152,6 +154,7 @@ export const ja = {
     unknown: '不明',
     indexMissing: '索引が欠損',
     repaired: '修復済み',
+    likelyOverwritten: '上書きの可能性',
   },
   repair: {
     rebuildIndex: '再生できるように修復',

@@ -1,18 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import type { FoundFile } from './bindings/FoundFile';
+import { t } from './i18n';
 import { applyFilters, folderTree, groupByDay, sortFiles, subfolders } from './results';
 
 let nextId = 0;
+
+function fsOrigin(folders: string[], label: string | null = 'SD'): FoundFile['origin'] {
+  return { type: 'fileSystem', volume: { index: 0, label }, folders, nameExact: true };
+}
 function file(over: Partial<FoundFile>): FoundFile {
   return {
     id: nextId++,
     kind: 'photo',
     name: `IMG_${nextId}.JPG`,
-    origin: { type: 'fileSystem', folders: ['SD', 'DCIM', '100CANON'] },
+    origin: fsOrigin(['DCIM', '100CANON']),
     offset: 0,
     size: 1000,
     capturedAt: '2025-08-14T10:00:00',
     durationSeconds: null,
+    confidence: 'high',
     status: 'recoverable',
     hidden: null,
     repair: null,
@@ -40,7 +46,7 @@ describe('results', () => {
 
   it('scopes to a folder, deep or direct', () => {
     const files = [
-      file({ origin: { type: 'fileSystem', folders: ['SD', 'DCIM'] } }),
+      file({ origin: fsOrigin(['DCIM']) }),
       file({}),
       file({ origin: { type: 'carved', namedFromMetadata: false } }),
     ];
@@ -73,8 +79,8 @@ describe('results', () => {
     const files = [
       file({}),
       file({}),
-      file({ origin: { type: 'fileSystem', folders: ['SD', 'DCIM', '101CANON'] } }),
-      file({ origin: { type: 'fileSystem', folders: ['SD', 'MISC'] } }),
+      file({ origin: fsOrigin(['DCIM', '101CANON']) }),
+      file({ origin: fsOrigin(['MISC']) }),
     ];
     expect(folderTree(files).map((r) => [r.name, r.depth, r.count])).toEqual([
       ['SD', 0, 4],
@@ -84,5 +90,10 @@ describe('results', () => {
       ['MISC', 1, 1],
     ]);
     expect(subfolders(files, ['SD']).map((r) => r.name)).toEqual(['DCIM', 'MISC']);
+  });
+
+  it('names unlabeled volumes by position', () => {
+    const f = file({ origin: fsOrigin(['DCIM'], null) });
+    expect(folderTree([f])[0]?.name).toBe(t('results.volume', { n: 1 }));
   });
 });
