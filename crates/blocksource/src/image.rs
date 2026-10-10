@@ -1,6 +1,6 @@
 use std::{fs::File, io, path::Path};
 
-use crate::{BlockSource, ReadError, ReadErrorKind, assert_sector_size, readable_len};
+use crate::{BlockSource, ReadError, assert_sector_size, pread::read_full, readable_len};
 
 /// ディスクイメージ（通常のファイル）。読み取り専用で開く。
 ///
@@ -45,31 +45,9 @@ impl BlockSource for ImageFile {
 
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, ReadError> {
         let want = readable_len(self.len, offset, buf.len());
-        let mut done = 0;
-        while let Some(rest) = buf.get_mut(done..want).filter(|r| !r.is_empty()) {
-            let pos = offset + done as u64;
-            match pread(&self.file, rest, pos) {
-                // 開いた後にファイルが縮んだ
-                Ok(0) => break,
-                Ok(n) => done += n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    let end = offset + want as u64;
-                    return Err(ReadError::new(pos..end, ReadErrorKind::Io(e)));
-                }
-            }
+        match buf.get_mut(..want) {
+            Some(dst) => read_full(&self.file, offset, dst),
+            None => Ok(0),
         }
-        Ok(done)
     }
-}
-
-#[cfg(unix)]
-fn pread(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    std::os::unix::fs::FileExt::read_at(file, buf, offset)
-}
-
-#[cfg(windows)]
-fn pread(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    // ファイルポインタは動くが、毎回位置を指定して読むので影響しない
-    std::os::windows::fs::FileExt::seek_read(file, buf, offset)
 }

@@ -4,19 +4,25 @@
 //! 書き込みの手段は一切提供しない（元ディスクへの書き込みを型の上で不可能にする）。
 //!
 //! - [`ImageFile`]：ディスクイメージ（ファイル）
+//! - [`Device`]：物理ディスク・ボリュームの生デバイス
 //! - [`MemSource`]：メモリ上のバッファ（テスト用）
 //! - [`Aligned`]：任意の位置・長さの読み込みを、セクタ境界に揃えた読み込みに変換する
 //! - [`sim`]：物理条件のシミュレーション（不良セクタ・遅延・シークコスト）
 
 mod aligned;
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+mod device;
 mod error;
 mod image;
 mod mem;
+mod pread;
 pub mod sim;
 
 use std::sync::Arc;
 
 pub use aligned::Aligned;
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+pub use device::Device;
 pub use error::{ReadError, ReadErrorKind};
 pub use image::ImageFile;
 pub use mem::MemSource;
