@@ -40,7 +40,7 @@ impl Mounted for Volume {
     }
 
     fn unmount(self: Box<Self>) -> Result<()> {
-        run(Command::new("sync"))?;
+        run(&mut Command::new("sync"))?;
         run(Command::new("sudo").arg("umount").arg(&self.root))?;
         let _ = std::fs::remove_dir(&self.root);
         Ok(())

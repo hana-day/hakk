@@ -2,16 +2,17 @@
 //!
 //! - macOS：`hdiutil` ＋ `newfs_exfat`（管理者権限不要）
 //! - Linux：`mkfs.exfat` ＋ ループバックマウント（`sudo` が必要。CI 用）
+//! - Windows：未対応（毎晩の CI で VHD を使う予定）
+
+// 未対応の OS では実装がなく、共通の補助関数が使われない
+#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{path::Path, process::Command};
 
 use anyhow::{Context, Result, bail};
 
@@ -58,8 +59,8 @@ pub(crate) fn run(cmd: &mut Command) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-#[allow(dead_code)]
-pub(crate) fn temp_mount_dir() -> Result<PathBuf> {
+#[cfg(target_os = "linux")]
+pub(crate) fn temp_mount_dir() -> Result<std::path::PathBuf> {
     let dir = std::env::temp_dir().join(format!("hakk-mnt-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)

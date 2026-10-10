@@ -161,6 +161,12 @@ dependencies = [
 [[package]]
 name = "hakk-eval"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "sha2",
+]
 
 [[package]]
 name = "hakk-scenario"
