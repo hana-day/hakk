@@ -41,6 +41,10 @@ pub struct JpegProfile {
     pub thumbnail: Option<Range>,
     /// Bytes appended after the final EOI, if any.
     pub trailer: Option<Range>,
+    /// Restart interval in rows of MCUs (one RST marker every N rows); none if absent.
+    /// Requires a `dri` entry in `segments`.
+    #[serde(default)]
+    pub restart_rows: Option<u16>,
 }
 
 /// A header segment of a profiled JPEG.
@@ -63,6 +67,8 @@ pub enum Segment {
     DhtEach,
     /// The frame header.
     Sof,
+    /// The restart interval (only with `restart_rows`).
+    Dri,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -129,6 +135,12 @@ impl Profiles {
                 || count(&[Segment::Sof]) != 1
             {
                 bail!("jpeg.{name}: segments need exactly one dqt, one dht and one sof");
+            }
+            if j.restart_rows.is_some() != j.segments.contains(&Segment::Dri) {
+                bail!("jpeg.{name}: restart_rows and a dri segment go together");
+            }
+            if j.restart_rows == Some(0) {
+                bail!("jpeg.{name}: restart_rows must be positive");
             }
             if j.exif_len[1] > 65_000 {
                 bail!("jpeg.{name}: exif_len must fit in one APP1 segment");

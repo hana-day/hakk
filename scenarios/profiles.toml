@@ -4,8 +4,6 @@
 # trailers, box layout, chunking), never content. Sources: the NPS nps-2009-canon2 SD card
 # images (Digital Corpora) and the VISION dataset (University of Florence).
 #
-# Not modeled yet: restart intervals (DRI/RST markers, used by every iPhone and some
-# Samsung devices), which need a JPEG encoder that can emit them.
 
 # --- Photos ---------------------------------------------------------------
 
@@ -20,24 +18,27 @@ segments = ["exif", "dqt", "sof", "dht"]
 exif_len = [8700, 9300]
 thumbnail = [2500, 4200]
 
-# iPhone 4S / 5c / 6 / 6 Plus: EXIF (8-16 KB) with a ~9-13 KB thumbnail; merged tables.
-# The real files also carry DRI between DQT and SOF (not modeled yet).
+# iPhone 4S / 5c / 6 / 6 Plus: EXIF (8-16 KB) with a ~9-13 KB thumbnail; merged tables;
+# a restart marker after every row of MCUs (DRI sits between DQT and SOF).
 [jpeg.iphone]
 make = "Apple"
 model = "iPhone 6"
 dir = "DCIM/100APPLE"
 name = "IMG_{n}.JPG"
-segments = ["exif", "dqt", "sof", "dht"]
+segments = ["exif", "dqt", "dri", "sof", "dht"]
+restart_rows = 1
 exif_len = [8190, 16382]
 thumbnail = [9000, 13500]
 
-# Samsung Galaxy S3 Mini: one segment per table and ~3.3 KB of data after EOI.
+# Samsung Galaxy S3 Mini: one segment per table, a restart marker every 8 rows of MCUs
+# (DRI right before SOS), and ~3.3 KB of data after EOI.
 [jpeg.samsung-s3mini]
 make = "SAMSUNG"
 model = "GT-I8190N"
 dir = "DCIM/Camera"
 name = "2016{n}_120000.jpg"
-segments = ["exif", "dqt-each", "sof", "dht-each"]
+segments = ["exif", "dqt-each", "sof", "dht-each", "dri"]
+restart_rows = 8
 exif_len = [10500, 13800]
 thumbnail = [9000, 10000]
 trailer = [3354, 3356]

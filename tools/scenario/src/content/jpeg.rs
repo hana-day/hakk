@@ -66,7 +66,13 @@ pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<
     let pixels = target as f64 / BYTES_PER_PIXEL;
     let height = ((pixels * f64::from(ah) / f64::from(aw)).sqrt() as u32 / 16).max(1) * 16;
     let width = (height * aw / ah / 16).max(1) * 16;
-    let main = Parts::parse(&encode_noise(width, height, 90, rng)?)?;
+    // 4:2:0 subsampling (16x16 MCUs), as phones and cameras use.
+    let restart = p.restart_rows.map(|rows| {
+        u16::try_from(width.div_ceil(16))
+            .unwrap_or(u16::MAX)
+            .saturating_mul(rows)
+    });
+    let main = Parts::parse(&encode_420(width, height, restart, rng)?)?;
 
     let thumbnail = match p.thumbnail {
         Some([lo, hi]) => Some(thumbnail(rng.range(lo, hi), rng)?),
@@ -89,6 +95,7 @@ pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<
             Segment::Dht => out.extend(segment(0xC4, &main.dht.concat())),
             Segment::DhtEach => main.dht.iter().for_each(|t| out.extend(segment(0xC4, t))),
             Segment::Sof => out.extend(segment(0xC0, &main.sof)),
+            Segment::Dri => out.extend(segment(0xDD, &main.dri)),
         }
     }
     out.extend_from_slice(&main.scan);
@@ -138,6 +145,25 @@ fn encode_noise(width: u32, height: u32, quality: u8, rng: &mut Rng) -> Result<V
     Ok(encoded)
 }
 
+/// Encodes noise with 4:2:0 subsampling and, if given, a restart interval (in MCUs).
+fn encode_420(width: u32, height: u32, restart: Option<u16>, rng: &mut Rng) -> Result<Vec<u8>> {
+    let mut pixels = vec![0u8; width as usize * height as usize * 3];
+    rng.fill(&mut pixels);
+    let mut encoded = Vec::new();
+    let mut enc = jpeg_encoder::Encoder::new(&mut encoded, 90);
+    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    if let Some(n) = restart {
+        enc.set_restart_interval(n);
+    }
+    enc.encode(
+        &pixels,
+        u16::try_from(width)?,
+        u16::try_from(height)?,
+        jpeg_encoder::ColorType::Rgb,
+    )?;
+    Ok(encoded)
+}
+
 /// A 160x120 JPEG thumbnail of about `target` bytes (as close as the quality steps allow).
 fn thumbnail(target: u64, rng: &mut Rng) -> Result<Vec<u8>> {
     let mut best = Vec::new();
@@ -158,14 +184,17 @@ struct Parts {
     dht: Vec<Vec<u8>>,
     /// SOF0 payload.
     sof: Vec<u8>,
+    /// DRI payload, if the encoder wrote one.
+    dri: Vec<u8>,
     /// From the SOS marker through EOI.
     scan: Vec<u8>,
 }
 
 impl Parts {
-    /// Reference: ITU-T T.81 B.2.4.1 (DQT), B.2.4.2 (DHT), B.2.2 (SOF), B.2.3 (SOS).
+    /// Reference: ITU-T T.81 B.2.4.1 (DQT), B.2.4.2 (DHT), B.2.4.4 (DRI), B.2.2 (SOF),
+    /// B.2.3 (SOS).
     fn parse(jpeg: &[u8]) -> Result<Self> {
-        let (mut dqt, mut dht, mut sof) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut dqt, mut dht, mut sof, mut dri) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut i = 2;
         loop {
             let (Some(&0xFF), Some(&marker)) = (jpeg.get(i), jpeg.get(i + 1)) else {
@@ -177,6 +206,7 @@ impl Parts {
                     dqt,
                     dht,
                     sof,
+                    dri,
                     scan,
                 });
             }
@@ -199,6 +229,7 @@ impl Parts {
                             .sum::<usize>()
                 })),
                 0xC0 => sof = body.to_vec(),
+                0xDD => dri = body.to_vec(),
                 _ => {} // APP0 from the encoder is dropped; the profile decides.
             }
             i += 2 + len;

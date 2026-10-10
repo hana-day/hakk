@@ -27,6 +27,9 @@ exceptions = [
     { allow = ["MPL-2.0"], crate = "dtoa-short" },
     # tauri -> dirs -> dirs-sys
     { allow = ["MPL-2.0"], crate = "option-ext" },
+    # Development tool only (tools/scenario, never shipped): a JPEG encoder that can write
+    # restart markers. The IJG license is permissive (attribution in distributed software).
+    { allow = ["IJG"], crate = "jpeg-encoder" },
 ]
 
 [licenses.private]
