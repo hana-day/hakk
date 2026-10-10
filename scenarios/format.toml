@@ -1,0 +1,22 @@
+# クイックフォーマット：書き込んだ後にフォーマットし、少し書き足す
+name = "format"
+seed = 2
+size = "64MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 40
+min_size = "200KiB"
+max_size = "1MiB"
+
+[[steps]]
+op = "format"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 5
+min_size = "200KiB"
+max_size = "1MiB"

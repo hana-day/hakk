@@ -1,0 +1,190 @@
+//! シナリオを実行してイメージと正解マニフェストを作る。
+
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::Path,
+    process::Command,
+};
+
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
+
+use crate::{
+    backend::{self, Backend},
+    content::{self, Meta},
+    locate::{self, Index},
+    manifest::{FileEntry, Generator, Manifest, VERSION},
+    rng::Rng,
+    scenario::{Scenario, Step},
+};
+
+pub const IMAGE_NAME: &str = "image.img";
+
+/// 実行中のファイル。中身は最後の照合まで持っておく。
+struct Tracked {
+    entry: FileEntry,
+    bytes: Vec<u8>,
+}
+
+pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
+    fs::create_dir_all(out_dir)?;
+    let image = out_dir.join(IMAGE_NAME);
+    // 中身ゼロの疎なファイル（ディスクを使い切らない）
+    File::create(&image)?.set_len(sc.size.0)?;
+
+    let backend = backend::native()?;
+    let mut rng = Rng::new(sc.seed);
+    let label = format!("HK{:08X}", rng.next_u64() as u32);
+    backend.format(&image, sc.fs, &label)?;
+
+    let mut files: Vec<Tracked> = Vec::new();
+    for (step_no, step) in sc.steps.iter().enumerate() {
+        match step {
+            Step::Write {
+                count,
+                kind,
+                min_size,
+                max_size,
+                dir,
+            } => {
+                let first_new = files.len();
+                with_mounted(backend.as_ref(), &image, |root| {
+                    fs::create_dir_all(root.join(dir))?;
+                    for _ in 0..*count {
+                        let id = u32::try_from(files.len())?;
+                        let target = rng.range(min_size.0, max_size.0);
+                        let g = content::generate(*kind, target, &mut rng.fork())?;
+                        let path = format!("{dir}/IMG_{:04}.{}", id + 1, content::extension(*kind));
+                        let mut f = File::create(root.join(&path))
+                            .with_context(|| format!("{path} を作れない"))?;
+                        f.write_all(&g.bytes)?;
+                        f.sync_all()?;
+                        files.push(Tracked {
+                            entry: entry(id, path, *kind, step_no, &g.bytes, g.meta),
+                            bytes: g.bytes,
+                        });
+                    }
+                    Ok(())
+                })?;
+                // 書き込んだ直後の配置を記録する
+                let snapshot = fs::read(&image)?;
+                let index = Index::new(&snapshot);
+                for f in files.iter_mut().skip(first_new) {
+                    f.entry.extents = index.locate(&f.bytes);
+                    f.entry.fragmented = f.entry.extents.as_ref().is_some_and(|e| e.len() > 1);
+                }
+            }
+            Step::Delete { fraction } => {
+                let mut live: Vec<usize> = (0..files.len())
+                    .filter(|&i| files.get(i).is_some_and(|f| f.entry.deleted_at.is_none()))
+                    .collect();
+                rng.shuffle(&mut live);
+                let n = (live.len() as f64 * fraction).round() as usize;
+                live.truncate(n);
+                live.sort_unstable();
+                with_mounted(backend.as_ref(), &image, |root| {
+                    for &i in &live {
+                        if let Some(f) = files.get_mut(i) {
+                            fs::remove_file(root.join(&f.entry.path))
+                                .with_context(|| format!("{} を削除できない", f.entry.path))?;
+                            f.entry.deleted_at = Some(step_no);
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            Step::Format => {
+                backend.format(&image, sc.fs, &label)?;
+                for f in files.iter_mut().filter(|f| f.entry.deleted_at.is_none()) {
+                    f.entry.deleted_at = Some(step_no);
+                }
+            }
+        }
+    }
+
+    // 最終イメージで、どれだけ元の中身が残っているか
+    let final_image = fs::read(&image)?;
+    for f in &mut files {
+        if let Some(ext) = &f.entry.extents {
+            f.entry.intact_bytes = locate::intact_bytes(&final_image, &f.bytes, ext);
+        }
+    }
+
+    Ok(Manifest {
+        version: VERSION,
+        scenario: sc.name.clone(),
+        seed: sc.seed,
+        fs: sc.fs,
+        image: IMAGE_NAME.to_owned(),
+        image_size: sc.size.0,
+        cluster_size: exfat_cluster_size(&final_image),
+        generator: generator(),
+        files: files.into_iter().map(|f| f.entry).collect(),
+    })
+}
+
+/// マウントして `f` を実行し、成否にかかわらず切り離す。
+fn with_mounted(
+    backend: &dyn Backend,
+    image: &Path,
+    f: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let m = backend.mount(image)?;
+    let result = f(m.root());
+    let unmounted = m.unmount();
+    result.and(unmounted)
+}
+
+fn entry(
+    id: u32,
+    path: String,
+    kind: crate::scenario::ContentKind,
+    step: usize,
+    bytes: &[u8],
+    meta: Meta,
+) -> FileEntry {
+    FileEntry {
+        id,
+        path,
+        kind,
+        size: bytes.len() as u64,
+        sha256: hex(&Sha256::digest(bytes)),
+        written_at: step,
+        deleted_at: None,
+        extents: None,
+        fragmented: false,
+        intact_bytes: 0,
+        meta,
+    }
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// exFAT のブートセクタからクラスタサイズを読む。
+/// 参考：Microsoft "exFAT file system specification" 3.1.14 BytesPerSectorShift / 3.1.15 SectorsPerClusterShift。
+fn exfat_cluster_size(image: &[u8]) -> Option<u64> {
+    if image.get(3..11)? != b"EXFAT   " {
+        return None;
+    }
+    let bps = u32::from(*image.get(108)?);
+    let spc = u32::from(*image.get(109)?);
+    1u64.checked_shl(bps.checked_add(spc)?)
+}
+
+fn generator() -> Generator {
+    let os_version = if cfg!(target_os = "macos") {
+        Command::new("sw_vers").arg("-productVersion").output()
+    } else {
+        Command::new("uname").arg("-r").output()
+    }
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    .unwrap_or_default();
+    Generator {
+        os: std::env::consts::OS.to_owned(),
+        os_version,
+        tool_version: env!("CARGO_PKG_VERSION").to_owned(),
+    }
+}

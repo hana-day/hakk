@@ -11,3 +11,13 @@ GPLのソースを参考にした場合は、仕組みを**コードを含まな
 | Linux のブロックデバイスの大きさ取得（`BLKSSZGET` / `BLKGETSIZE64`） | Linux `<linux/fs.h>` |
 | Windows のディスクの大きさ取得（`IOCTL_DISK_GET_LENGTH_INFO` / `IOCTL_DISK_GET_DRIVE_GEOMETRY_EX`） | Microsoft Learn（Win32 API ドキュメント） |
 | 疑似乱数（SplitMix64） | Steele, Lea, Flood "Fast Splittable Pseudorandom Number Generators" (OOPSLA 2014) |
+
+## tools/scenario（シナリオ生成器）
+
+| 内容 | 資料 |
+|---|---|
+| exFAT のブートセクタ（クラスタサイズの読み取り） | Microsoft "exFAT file system specification" 3.1.14、3.1.15 |
+| EXIF（APP1、TIFF IFD、Make / Model / DateTimeOriginal） | CIPA DC-008（Exif 2.3）、TIFF Revision 6.0 |
+| JPEG のセグメント構造（SOI、APPn、COM） | ITU-T T.81 Annex B |
+| MP4 の box 構造（ftyp / mdat / moov、stbl の各表） | ISO/IEC 14496-12（ISO BMFF） |
+| AVC のサンプルエントリ（avc1 / avcC）、長さ付き NAL 単位 | ISO/IEC 14496-15 |

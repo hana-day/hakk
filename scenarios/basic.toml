@@ -1,0 +1,33 @@
+# 基本：写真と動画を書き込み、半分を削除し、少し書き足す
+# macOS の exFAT は空いた領域を前から再利用するので、削除したファイルの一部が上書きされ、
+# 書き足したファイルは隙間を埋めるように断片化する
+name = "basic"
+seed = 1
+size = "64MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 30
+min_size = "200KiB"
+max_size = "1MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+count = 3
+min_size = "2MiB"
+max_size = "6MiB"
+dir = "DCIM/101HAKK"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 6
+min_size = "300KiB"
+max_size = "1MiB"

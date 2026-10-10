@@ -42,3 +42,27 @@ jobs:
       # 物理ディスク経路：hdiutil でイメージを生デバイスとして接続して読む
       - if: runner.os == 'macOS'
         run: cargo test -p blocksource --test device_macos -- --ignored
+
+  scenario:
+    name: scenario (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y exfatprogs
+      - run: cargo build -p hakk-scenario --release
+      - name: シナリオからイメージと正解マニフェストを生成
+        shell: bash
+        run: |
+          for s in scenarios/*.toml; do
+            ./target/release/hakk-scenario "$s" "work/$(basename "$s" .toml)"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manifests-${{ matrix.os }}
+          path: work/*/manifest.json
