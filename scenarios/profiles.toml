@@ -1,0 +1,174 @@
+# Device profiles: structure observed in files written by real cameras and phones.
+#
+# Only structure and sizes are recorded here (segment order, EXIF and thumbnail sizes,
+# trailers, box layout, chunking), never content. Sources: the NPS nps-2009-canon2 SD card
+# images (Digital Corpora) and the VISION dataset (University of Florence).
+#
+# Not modeled yet: restart intervals (DRI/RST markers, used by every iPhone and some
+# Samsung devices), which need a JPEG encoder that can emit them.
+
+# --- Photos ---------------------------------------------------------------
+
+# Canon PowerShot SD800 IS (nps-2009-canon2): EXIF with a ~2.5-4 KB thumbnail, then one
+# DQT and one DHT segment holding all tables. No JFIF.
+[jpeg.canon-compact]
+make = "Canon"
+model = "Canon PowerShot SD800 IS"
+dir = "DCIM/100CANON"
+name = "IMG_{n}.JPG"
+segments = ["exif", "dqt", "sof", "dht"]
+exif_len = [8700, 9300]
+thumbnail = [2500, 4200]
+
+# iPhone 4S / 5c / 6 / 6 Plus: EXIF (8-16 KB) with a ~9-13 KB thumbnail; merged tables.
+# The real files also carry DRI between DQT and SOF (not modeled yet).
+[jpeg.iphone]
+make = "Apple"
+model = "iPhone 6"
+dir = "DCIM/100APPLE"
+name = "IMG_{n}.JPG"
+segments = ["exif", "dqt", "sof", "dht"]
+exif_len = [8190, 16382]
+thumbnail = [9000, 13500]
+
+# Samsung Galaxy S3 Mini: one segment per table and ~3.3 KB of data after EOI.
+[jpeg.samsung-s3mini]
+make = "SAMSUNG"
+model = "GT-I8190N"
+dir = "DCIM/Camera"
+name = "2016{n}_120000.jpg"
+segments = ["exif", "dqt-each", "sof", "dht-each"]
+exif_len = [10500, 13800]
+thumbnail = [9000, 10000]
+trailer = [3354, 3356]
+
+# LG D290: merged tables and ~180 KB of data after EOI.
+[jpeg.lg]
+make = "LG Electronics"
+model = "LG-D290"
+dir = "DCIM/Camera"
+name = "2016{n}_120000.jpg"
+segments = ["exif", "dqt", "sof", "dht"]
+exif_len = [15200, 18800]
+thumbnail = [13000, 15000]
+trailer = [177000, 181000]
+
+# Huawei P9 Lite: JFIF after EXIF, one segment per table, a large (~45 KB) thumbnail.
+[jpeg.huawei]
+make = "HUAWEI"
+model = "HUAWEI VNS-L31"
+dir = "DCIM/Camera"
+name = "IMG_2016{n}_120000.jpg"
+segments = ["exif", "jfif", "dqt-each", "sof", "dht-each"]
+exif_len = [26000, 54600]
+thumbnail = [40000, 46000]
+
+# Lenovo P70-A: four large vendor APPn segments (APP5-APP8) after EXIF.
+[jpeg.lenovo]
+make = "LENOVO"
+model = "Lenovo P70-A"
+dir = "DCIM/Camera"
+name = "IMG_2016{n}_120000.jpg"
+segments = [
+    "exif",
+    { app = { n = 5, len = [7700, 7720] } },
+    { app = { n = 6, len = [61280, 61300] } },
+    { app = { n = 7, len = [4070, 4090] } },
+    { app = { n = 8, len = [65040, 65060] } },
+    "dqt-each",
+    "sof",
+    "dht-each",
+]
+exif_len = [12700, 13100]
+thumbnail = [11000, 12000]
+
+# OnePlus 3: a second APP1 and three APP4 segments (two of them at the 64 KB maximum).
+[jpeg.oneplus]
+make = "OnePlus"
+model = "ONEPLUS A3000"
+dir = "DCIM/Camera"
+name = "IMG_2016{n}_120000.jpg"
+segments = [
+    "exif",
+    { app = { n = 1, len = [385, 395] } },
+    { app = { n = 4, len = [65531, 65531] } },
+    { app = { n = 4, len = [65531, 65531] } },
+    { app = { n = 4, len = [38900, 39000] } },
+    "dqt",
+    "sof",
+    "dht",
+]
+exif_len = [8800, 10400]
+thumbnail = [9000, 10000]
+
+# --- Videos ---------------------------------------------------------------
+
+# iPhone / iPad (QuickTime): ftyp(qt) wide mdat moov. Video and audio interleave about
+# every half second; iOS 8+ adds two timed metadata (mebx) tracks.
+[video.iphone]
+dir = "DCIM/100APPLE"
+name = "IMG_{n}.MOV"
+brand = "qt  "
+compatible = ["qt  "]
+layout = "moov-last"
+wide = true
+video_per_chunk = 15
+audio_per_chunk = 43
+metadata_tracks = 2
+
+# Samsung Galaxy S3 Mini / Tab 3 / Trend Plus: ftyp mdat moov, about one second per chunk.
+[video.android-moov-last]
+dir = "DCIM/Camera"
+name = "2016{n}_120000.mp4"
+brand = "isom"
+compatible = ["isom", "3gp4"]
+layout = "moov-last"
+video_per_chunk = 33
+audio_per_chunk = 49
+
+# Huawei P9 / Galaxy S3 / Asus: a fixed ~810 KB area for moov + free is reserved before
+# recording, then mdat. 64-bit chunk offsets.
+[video.android-moov-first]
+dir = "DCIM/Camera"
+name = "VID_2016{n}_120000.mp4"
+brand = "mp42"
+compatible = ["isom", "mp42"]
+layout = "moov-first"
+reserve = [810242, 810242]
+video_per_chunk = 33
+audio_per_chunk = 49
+co64 = true
+
+# LG D290 / Asus Zenfone 2 Laser: same idea with a ~405 KB reserved area, 32-bit offsets.
+[video.android-moov-first-small]
+dir = "DCIM/Camera"
+name = "2016{n}_120000.mp4"
+brand = "mp42"
+compatible = ["isom", "mp42"]
+layout = "moov-first"
+reserve = [405000, 405130]
+video_per_chunk = 33
+audio_per_chunk = 49
+
+# Microsoft Lumia 640: one sample per chunk, so audio and video alternate every frame.
+[video.lumia]
+dir = "DCIM/Camera"
+name = "WP_2016{n}_001.mp4"
+brand = "mp42"
+compatible = ["mp42", "3gp6", "isom", "M4V "]
+layout = "moov-last"
+video_per_chunk = 1
+audio_per_chunk = 1
+
+# Sony Xperia Z1 Compact: reserved moov area, video only in a single chunk, and two
+# vendor uuid boxes after mdat.
+[video.xperia]
+dir = "DCIM/100ANDRO"
+name = "MOV_{n}.mp4"
+brand = "mp42"
+compatible = ["isom", "mp42"]
+layout = "moov-first"
+reserve = [810000, 810000]
+video_per_chunk = 1000000
+co64 = true
+trailing_uuid = [[68600, 68700], [400, 420]]

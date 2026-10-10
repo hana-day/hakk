@@ -41,6 +41,9 @@ pub struct FileEntry {
     /// Path within the volume (`/`-separated).
     pub path: String,
     pub kind: ContentKind,
+    /// Device profile the file was generated with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub size: u64,
     pub sha256: String,
     /// Index of the step that wrote the file.

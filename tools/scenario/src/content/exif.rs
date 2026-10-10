@@ -46,41 +46,82 @@ impl Exif {
         }
     }
 
-    /// The whole APP1 segment (starting at the `FF E1` marker).
+    /// Capture info for a given camera with a random capture time.
+    pub fn for_camera(make: &str, model: &str, rng: &mut Rng) -> Self {
+        let mut e = Self::random(rng);
+        e.make = make.to_owned();
+        e.model = model.to_owned();
+        e
+    }
+
+    /// The whole APP1 segment (starting at the `FF E1` marker) with no thumbnail or padding.
     pub fn app1(&self) -> Vec<u8> {
+        self.app1_with(None, 0, &mut Rng::new(0))
+    }
+
+    /// The whole APP1 segment (starting at the `FF E1` marker).
+    ///
+    /// `thumbnail` is embedded as a JPEG in IFD1, as cameras do. If the segment would be
+    /// shorter than `target_len` (the APP1 length field), a MakerNote of random bytes pads it.
+    pub fn app1_with(&self, thumbnail: Option<&[u8]>, target_len: usize, rng: &mut Rng) -> Vec<u8> {
         // TIFF header (little endian). All offsets count from the start of the TIFF header.
         let make = ascii(&self.make);
         let model = ascii(&self.model);
         let date = ascii(&self.date_time_original);
+        let thumb = thumbnail.unwrap_or_default();
 
-        const IFD0: u32 = 8;
-        const IFD0_ENTRIES: u16 = 3;
-        let exif_ifd = IFD0 + ifd_len(IFD0_ENTRIES);
-        const EXIF_ENTRIES: u16 = 1;
-        let data = exif_ifd + ifd_len(EXIF_ENTRIES);
+        let ifd0: u32 = 8;
+        let ifd0_entries: u16 = 3;
+        let exif_ifd = ifd0 + ifd_len(ifd0_entries);
+        let exif_entries: u16 = 2; // DateTimeOriginal, MakerNote
+        let ifd1 = exif_ifd + ifd_len(exif_entries);
+        let ifd1_entries: u16 = if thumb.is_empty() { 0 } else { 3 };
+        let data = if thumb.is_empty() {
+            ifd1
+        } else {
+            ifd1 + ifd_len(ifd1_entries)
+        };
         let make_at = data;
         let model_at = make_at + len32(&make);
         let date_at = model_at + len32(&model);
+        let note_at = date_at + len32(&date);
+        // APP1 length field = 2 (itself) + 6 ("Exif\0\0") + TIFF.
+        let fixed = 2 + 6 + note_at as usize + thumb.len();
+        let note = super::jpeg::no_markers(rng.bytes(target_len.saturating_sub(fixed).max(4)));
+        let thumb_at = note_at + len32(&note);
 
         let mut t = Vec::new();
         t.extend_from_slice(b"II\x2A\x00");
-        t.extend_from_slice(&IFD0.to_le_bytes());
+        t.extend_from_slice(&ifd0.to_le_bytes());
 
-        // IFD0, tags in ascending order.
-        t.extend_from_slice(&IFD0_ENTRIES.to_le_bytes());
+        // IFD0, tags in ascending order. The next-IFD link points at IFD1 (the thumbnail).
+        t.extend_from_slice(&ifd0_entries.to_le_bytes());
         entry(&mut t, 0x010F, ASCII, len32(&make), make_at); // Make
         entry(&mut t, 0x0110, ASCII, len32(&model), model_at); // Model
         entry(&mut t, 0x8769, LONG, 1, exif_ifd); // ExifIFDPointer
-        t.extend_from_slice(&0u32.to_le_bytes());
+        let next = if thumb.is_empty() { 0 } else { ifd1 };
+        t.extend_from_slice(&next.to_le_bytes());
 
         // Exif IFD
-        t.extend_from_slice(&EXIF_ENTRIES.to_le_bytes());
+        t.extend_from_slice(&exif_entries.to_le_bytes());
         entry(&mut t, 0x9003, ASCII, len32(&date), date_at); // DateTimeOriginal
+        entry(&mut t, 0x927C, UNDEFINED, len32(&note), note_at); // MakerNote
         t.extend_from_slice(&0u32.to_le_bytes());
+
+        // IFD1: the thumbnail (Compression = 6, JPEG).
+        if !thumb.is_empty() {
+            t.extend_from_slice(&ifd1_entries.to_le_bytes());
+            entry(&mut t, 0x0103, SHORT, 1, 6); // Compression
+            entry(&mut t, 0x0201, LONG, 1, thumb_at); // JPEGInterchangeFormat
+            entry(&mut t, 0x0202, LONG, 1, len32(thumb)); // JPEGInterchangeFormatLength
+            t.extend_from_slice(&0u32.to_le_bytes());
+        }
 
         t.extend_from_slice(&make);
         t.extend_from_slice(&model);
         t.extend_from_slice(&date);
+        t.extend_from_slice(&note);
+        t.extend_from_slice(thumb);
 
         let mut seg = vec![0xFF, 0xE1];
         let len = u16::try_from(2 + 6 + t.len()).unwrap_or(u16::MAX);
@@ -92,7 +133,9 @@ impl Exif {
 }
 
 const ASCII: u16 = 2;
+const SHORT: u16 = 3;
 const LONG: u16 = 4;
+const UNDEFINED: u16 = 7;
 
 fn ascii(s: &str) -> Vec<u8> {
     let mut v = s.as_bytes().to_vec();
@@ -109,8 +152,8 @@ const fn ifd_len(n: u16) -> u32 {
     2 + 12 * n as u32 + 4
 }
 
-/// Every value here is longer than 4 bytes or a single LONG, so the value field holds an
-/// offset (or the value itself).
+/// Every value here is longer than 4 bytes, a single LONG or a single SHORT, so the value
+/// field holds an offset or the value itself (a SHORT sits in the low bytes, little endian).
 fn entry(t: &mut Vec<u8>, tag: u16, ty: u16, count: u32, value: u32) {
     t.extend_from_slice(&tag.to_le_bytes());
     t.extend_from_slice(&ty.to_le_bytes());

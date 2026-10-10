@@ -5,7 +5,7 @@ use std::{fs, path::Path};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::size::Size;
+use crate::{content::profile::Profiles, size::Size};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +16,9 @@ pub struct Scenario {
     pub size: Size,
     pub fs: FsKind,
     pub steps: Vec<Step>,
+    /// Device profiles, loaded from `profiles.toml` next to the scenario or one level up.
+    #[serde(skip)]
+    pub profiles: Profiles,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
@@ -33,8 +36,12 @@ pub enum Step {
         kind: ContentKind,
         min_size: Size,
         max_size: Size,
-        #[serde(default = "default_dir")]
-        dir: String,
+        /// Directory to write to; defaults to the profile's, or `DCIM/100HAKK`.
+        #[serde(default)]
+        dir: Option<String>,
+        /// Device profile from `profiles.toml` (structure, directory and naming).
+        #[serde(default)]
+        profile: Option<String>,
     },
     /// Delete live files picked by the seed.
     Delete {
@@ -55,16 +62,19 @@ pub enum ContentKind {
     Mp4,
 }
 
-fn default_dir() -> String {
-    "DCIM/100HAKK".to_owned()
-}
-
 impl Scenario {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-        let sc: Self =
+        let mut sc: Self =
             toml::from_str(&text).with_context(|| format!("{} is malformed", path.display()))?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        if let Some(p) = [dir.join("profiles.toml"), dir.join("../profiles.toml")]
+            .into_iter()
+            .find(|p| p.exists())
+        {
+            sc.profiles = Profiles::load(&p)?;
+        }
         sc.validate()?;
         Ok(sc)
     }
@@ -76,8 +86,21 @@ impl Scenario {
         for (i, step) in self.steps.iter().enumerate() {
             match step {
                 Step::Write {
-                    min_size, max_size, ..
+                    min_size,
+                    max_size,
+                    kind,
+                    profile,
+                    ..
                 } => {
+                    if let Some(name) = profile {
+                        let known = match kind {
+                            ContentKind::Jpeg => self.profiles.jpeg.contains_key(name),
+                            ContentKind::Mp4 => self.profiles.video.contains_key(name),
+                        };
+                        if !known {
+                            bail!("steps[{i}]: unknown {kind:?} profile {name:?}");
+                        }
+                    }
                     if min_size > max_size {
                         bail!("steps[{i}]: min_size > max_size");
                     }

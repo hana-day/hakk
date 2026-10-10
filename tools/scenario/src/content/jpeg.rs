@@ -9,7 +9,11 @@
 use anyhow::Result;
 use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 
-use super::{Generated, Meta, exif::Exif};
+use super::{
+    Generated, Meta,
+    exif::Exif,
+    profile::{JpegProfile, Segment},
+};
 use crate::rng::Rng;
 
 /// Approximate bytes per pixel when encoding noise at quality 90.
@@ -52,9 +56,177 @@ pub fn generate(target: u64, rng: &mut Rng) -> Result<Generated> {
 /// A random COM segment. Its length is random too, shifting the tables that follow.
 fn comment(rng: &mut Rng) -> Vec<u8> {
     let len = rng.range(600, 1500) as usize;
-    let mut seg = vec![0xFF, 0xFE];
-    seg.extend_from_slice(&u16::try_from(len + 2).unwrap_or(u16::MAX).to_be_bytes());
-    seg.extend_from_slice(&rng.bytes(len));
+    segment(0xFE, &no_markers(rng.bytes(len)))
+}
+
+/// A JPEG following a device profile: header segments in the device's order, an EXIF
+/// thumbnail if the device embeds one, and trailing bytes after EOI if it appends any.
+pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<Generated> {
+    let [aw, ah] = p.aspect;
+    let pixels = target as f64 / BYTES_PER_PIXEL;
+    let height = ((pixels * f64::from(ah) / f64::from(aw)).sqrt() as u32 / 16).max(1) * 16;
+    let width = (height * aw / ah / 16).max(1) * 16;
+    let main = Parts::parse(&encode_noise(width, height, 90, rng)?)?;
+
+    let thumbnail = match p.thumbnail {
+        Some([lo, hi]) => Some(thumbnail(rng.range(lo, hi), rng)?),
+        None => None,
+    };
+    let exif = Exif::for_camera(&p.make, &p.model, rng);
+    let exif_len = rng.range(p.exif_len[0], p.exif_len[1]) as usize;
+
+    let mut out = vec![0xFF, 0xD8];
+    for s in &p.segments {
+        match s {
+            Segment::Exif => out.extend(exif.app1_with(thumbnail.as_deref(), exif_len, rng)),
+            Segment::Jfif => out.extend(segment(0xE0, &JFIF)),
+            Segment::App { n, len } => {
+                let len = rng.range(len[0], len[1]) as usize;
+                out.extend(segment(0xE0 + (n & 0x0F), &no_markers(rng.bytes(len))));
+            }
+            Segment::Dqt => out.extend(segment(0xDB, &main.dqt.concat())),
+            Segment::DqtEach => main.dqt.iter().for_each(|t| out.extend(segment(0xDB, t))),
+            Segment::Dht => out.extend(segment(0xC4, &main.dht.concat())),
+            Segment::DhtEach => main.dht.iter().for_each(|t| out.extend(segment(0xC4, t))),
+            Segment::Sof => out.extend(segment(0xC0, &main.sof)),
+        }
+    }
+    out.extend_from_slice(&main.scan);
+    if let Some([lo, hi]) = p.trailer {
+        let len = rng.range(lo, hi) as usize;
+        out.extend(no_markers(rng.bytes(len)));
+    }
+
+    Ok(Generated {
+        bytes: out,
+        meta: Meta {
+            exif: Some(exif),
+            width: Some(width),
+            height: Some(height),
+            ..Meta::default()
+        },
+    })
+}
+
+/// Removes `FF D8` and `FF D9` from random filler. Real vendor data rarely contains them,
+/// and stray ones would make the files harder to carve than the real thing.
+pub fn no_markers(mut bytes: Vec<u8>) -> Vec<u8> {
+    for i in 1..bytes.len() {
+        if bytes.get(i - 1) == Some(&0xFF)
+            && let Some(b) = bytes.get_mut(i)
+            && (*b == 0xD8 || *b == 0xD9)
+        {
+            *b = 0x00;
+        }
+    }
+    bytes
+}
+
+/// JFIF 1.01, aspect ratio 1:1.
+const JFIF: [u8; 14] = [b'J', b'F', b'I', b'F', 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
+
+fn encode_noise(width: u32, height: u32, quality: u8, rng: &mut Rng) -> Result<Vec<u8>> {
+    let mut pixels = vec![0u8; width as usize * height as usize * 3];
+    rng.fill(&mut pixels);
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, quality).encode(
+        &pixels,
+        width,
+        height,
+        ExtendedColorType::Rgb8,
+    )?;
+    Ok(encoded)
+}
+
+/// A 160x120 JPEG thumbnail of about `target` bytes (as close as the quality steps allow).
+fn thumbnail(target: u64, rng: &mut Rng) -> Result<Vec<u8>> {
+    let mut best = Vec::new();
+    for quality in [90, 75, 60, 45, 30, 20, 10] {
+        best = encode_noise(160, 120, quality, &mut rng.fork())?;
+        if best.len() as u64 <= target {
+            break;
+        }
+    }
+    Ok(best)
+}
+
+/// An encoded JPEG split into its tables, frame header and scan.
+struct Parts {
+    /// One entry per quantization table (precision/id byte + values).
+    dqt: Vec<Vec<u8>>,
+    /// One entry per Huffman table (class/id byte + counts + symbols).
+    dht: Vec<Vec<u8>>,
+    /// SOF0 payload.
+    sof: Vec<u8>,
+    /// From the SOS marker through EOI.
+    scan: Vec<u8>,
+}
+
+impl Parts {
+    /// Reference: ITU-T T.81 B.2.4.1 (DQT), B.2.4.2 (DHT), B.2.2 (SOF), B.2.3 (SOS).
+    fn parse(jpeg: &[u8]) -> Result<Self> {
+        let (mut dqt, mut dht, mut sof) = (Vec::new(), Vec::new(), Vec::new());
+        let mut i = 2;
+        loop {
+            let (Some(&0xFF), Some(&marker)) = (jpeg.get(i), jpeg.get(i + 1)) else {
+                anyhow::bail!("unexpected bytes at {i} in the encoder output");
+            };
+            if marker == 0xDA {
+                let scan = jpeg.get(i..).unwrap_or_default().to_vec();
+                return Ok(Self {
+                    dqt,
+                    dht,
+                    sof,
+                    scan,
+                });
+            }
+            let len = jpeg
+                .get(i + 2..i + 4)
+                .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                .map(|b| usize::from(u16::from_be_bytes(b)))
+                .unwrap_or(0);
+            let body = jpeg.get(i + 4..i + 2 + len).unwrap_or_default();
+            match marker {
+                0xDB => dqt.extend(split(body, |t| {
+                    1 + 64 * (1 + usize::from(t.first().copied().unwrap_or(0) >> 4))
+                })),
+                0xC4 => dht.extend(split(body, |t| {
+                    1 + 16
+                        + t.get(1..17)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|&c| usize::from(c))
+                            .sum::<usize>()
+                })),
+                0xC0 => sof = body.to_vec(),
+                _ => {} // APP0 from the encoder is dropped; the profile decides.
+            }
+            i += 2 + len;
+        }
+    }
+}
+
+/// Splits a segment payload holding several tables, given each table's length.
+fn split(mut body: &[u8], len: impl Fn(&[u8]) -> usize) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    while !body.is_empty() {
+        let n = len(body).min(body.len());
+        let (t, rest) = body.split_at(n);
+        out.push(t.to_vec());
+        body = rest;
+    }
+    out
+}
+
+/// A marker segment: `FF marker`, a 16-bit length, then `payload`.
+fn segment(marker: u8, payload: &[u8]) -> Vec<u8> {
+    let mut seg = vec![0xFF, marker];
+    seg.extend_from_slice(
+        &u16::try_from(payload.len() + 2)
+            .unwrap_or(u16::MAX)
+            .to_be_bytes(),
+    );
+    seg.extend_from_slice(payload);
     seg
 }
 

@@ -43,21 +43,33 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                 min_size,
                 max_size,
                 dir,
+                profile,
             } => {
                 let first_new = files.len();
                 with_mounted(backend.as_ref(), &image, |root| {
-                    fs::create_dir_all(root.join(dir))?;
                     for _ in 0..*count {
                         let id = u32::try_from(files.len())?;
                         let target = rng.range(min_size.0, max_size.0);
-                        let g = content::generate(*kind, target, &mut rng.fork())?;
-                        let path = format!("{dir}/IMG_{:04}.{}", id + 1, content::extension(*kind));
+                        let p = profile.as_deref();
+                        let g = content::generate(*kind, p, &sc.profiles, target, &mut rng.fork())?;
+                        let path = content::path(*kind, p, &sc.profiles, dir.as_deref(), id + 1);
+                        if let Some(parent) = Path::new(&path).parent() {
+                            fs::create_dir_all(root.join(parent))?;
+                        }
                         let mut f = File::create(root.join(&path))
                             .with_context(|| format!("cannot create {path}"))?;
                         f.write_all(&g.bytes)?;
                         f.sync_all()?;
                         files.push(Tracked {
-                            entry: entry(id, path, *kind, step_no, &g.bytes, g.meta),
+                            entry: entry(
+                                id,
+                                path,
+                                *kind,
+                                profile.clone(),
+                                step_no,
+                                &g.bytes,
+                                g.meta,
+                            ),
                             bytes: g.bytes,
                         });
                     }
@@ -147,6 +159,7 @@ fn entry(
     id: u32,
     path: String,
     kind: crate::scenario::ContentKind,
+    profile: Option<String>,
     step: usize,
     bytes: &[u8],
     meta: Meta,
@@ -155,6 +168,7 @@ fn entry(
         id,
         path,
         kind,
+        profile,
         size: bytes.len() as u64,
         sha256: hex(&Sha256::digest(bytes)),
         written_at: step,

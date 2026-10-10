@@ -46,6 +46,11 @@ fn bench(args: &[String]) -> Result<()> {
     } else {
         args.iter().map(PathBuf::from).collect()
     };
+    // Device profiles live next to the scenarios but are not scenarios themselves.
+    let scenarios: Vec<PathBuf> = scenarios
+        .into_iter()
+        .filter(|p| p.file_name().is_none_or(|n| n != "profiles.toml"))
+        .collect();
 
     run(Command::new("cargo").args([
         "build",
