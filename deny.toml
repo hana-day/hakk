@@ -1,0 +1,33 @@
+# cargo-deny 設定。GPL/AGPL系の依存を入れないための検査
+[graph]
+all-features = true
+
+[licenses]
+# 許可リスト方式。ここにないライセンスは失敗する（GPL/LGPL/AGPL/MPLなどは意図的に含めない）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# 自前のクレート（publish = false）はライセンス未記載でも検査対象外
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

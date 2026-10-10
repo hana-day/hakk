@@ -1,0 +1,10 @@
+[package]
+name = "blocksource"
+description = "読み込み層の抽象化（物理ディスク / イメージファイル / 障害注入）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/blocksource", "tools/scenario", "tools/eval"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.97"
+# ライセンス未決（すべての権利を留保）。決定するまで license は書かない
+publish = false
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+cast_possible_truncation = "warn"

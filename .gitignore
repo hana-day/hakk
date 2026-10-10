@@ -1,0 +1,16 @@
+/target/
+
+# 設計資料（ローカルのみ）
+/.tmp/
+
+# テスト素材・生成イメージはGitに入れない
+/samples/
+/work/
+*.img
+*.dmg
+*.sparseimage
+*.vhd
+*.vhdx
+*.iso
+
+.DS_Store
