@@ -40,7 +40,9 @@ impl Backend for Vhd {
         let _ = fs::remove_file(&script);
         result?;
 
-        let FsKind::Exfat = fs;
+        let FsKind::Exfat = fs else {
+            anyhow::bail!("{fs:?} has no OS driver");
+        };
         powershell(&format!(
             "$d = Mount-DiskImage -ImagePath {img} -PassThru | Get-Disk
              Initialize-Disk -Number $d.Number -PartitionStyle MBR
@@ -54,7 +56,9 @@ impl Backend for Vhd {
     }
 
     fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()> {
-        let FsKind::Exfat = fs;
+        let FsKind::Exfat = fs else {
+            anyhow::bail!("{fs:?} has no OS driver");
+        };
         let m = self.mount(image)?;
         // Quick format by default (data areas are kept unless -Full is given).
         let result = powershell(&format!(

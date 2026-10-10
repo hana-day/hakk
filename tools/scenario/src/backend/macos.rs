@@ -18,7 +18,9 @@ const RAW: [&str; 2] = ["-imagekey", "diskimage-class=CRawDiskImage"];
 
 impl Backend for Hdiutil {
     fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()> {
-        let FsKind::Exfat = fs;
+        let FsKind::Exfat = fs else {
+            anyhow::bail!("{fs:?} has no OS driver");
+        };
         let dev = attach_nomount(image)?;
         let result = run(Command::new("newfs_exfat").args(["-v", label]).arg(&dev));
         detach(&dev)?;

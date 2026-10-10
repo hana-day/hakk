@@ -13,7 +13,9 @@ pub struct Loop;
 
 impl Backend for Loop {
     fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()> {
-        let FsKind::Exfat = fs;
+        let FsKind::Exfat = fs else {
+            anyhow::bail!("{fs:?} has no OS driver");
+        };
         run(Command::new("mkfs.exfat").args(["-L", label]).arg(image)).map(drop)
     }
 

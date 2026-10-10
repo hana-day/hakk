@@ -15,6 +15,7 @@ use crate::{rng::Rng, scenario::ContentKind};
 use profile::Profiles;
 
 pub use exif::Exif;
+pub use jpeg::no_markers;
 
 /// A generated file.
 pub struct Generated {

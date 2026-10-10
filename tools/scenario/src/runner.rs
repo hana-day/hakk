@@ -15,8 +15,9 @@ use crate::{
     content::{self, Meta},
     locate::{self, Index},
     manifest::{FileEntry, Generator, Manifest, VERSION},
+    raw,
     rng::Rng,
-    scenario::{Scenario, Step},
+    scenario::{FsKind, Scenario, Step},
 };
 
 pub const IMAGE_NAME: &str = "image.img";
@@ -29,9 +30,12 @@ struct Tracked {
 
 pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
     fs::create_dir_all(out_dir)?;
-    let backend = backend::native()?;
     let mut rng = Rng::new(sc.seed);
     let label = format!("HK{:08X}", rng.next_u64() as u32);
+    if sc.fs == FsKind::None {
+        return run_raw(sc, out_dir, &mut rng);
+    }
+    let backend = backend::native()?;
     let image = backend.create(out_dir, sc.size.0, sc.fs, &label)?;
 
     let mut files: Vec<Tracked> = Vec::new();
@@ -110,6 +114,9 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                     Ok(())
                 })?;
             }
+            Step::Place { .. } => {
+                anyhow::bail!("steps[{step_no}]: `place` needs fs = \"none\"");
+            }
             Step::Format => {
                 backend.format(&image, sc.fs, &label)?;
                 for f in files.iter_mut().filter(|f| f.entry.deleted_at.is_none()) {
@@ -140,6 +147,46 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
         cluster_size: exfat_cluster_size(&final_image),
         generator: generator(),
         files: files.into_iter().map(|f| f.entry).collect(),
+    })
+}
+
+/// Runs a scenario without a file system: files are placed directly on the disk.
+fn run_raw(sc: &Scenario, out_dir: &Path, rng: &mut Rng) -> Result<Manifest> {
+    let (disk, placed) = raw::run(sc, rng)?;
+    fs::write(out_dir.join(IMAGE_NAME), &disk)?;
+    let files = placed
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let bytes = &p.generated.bytes;
+            let mut e = entry(
+                u32::try_from(i).unwrap_or(u32::MAX),
+                p.path,
+                p.kind,
+                p.profile,
+                p.step,
+                bytes,
+                p.generated.meta,
+            );
+            // Without a file system nothing is allocated: every file counts as deleted.
+            e.deleted_at = Some(p.step);
+            e.intact_bytes = locate::intact_bytes(&disk, bytes, &p.extents);
+            e.fragmented = p.extents.len() > 1;
+            e.extents = Some(p.extents);
+            e
+        })
+        .collect();
+    Ok(Manifest {
+        version: VERSION,
+        scenario: sc.name.clone(),
+        seed: sc.seed,
+        fs: sc.fs,
+        image: IMAGE_NAME.to_owned(),
+        image_size: sc.size.0,
+        partition_offset: 0,
+        cluster_size: None,
+        generator: generator(),
+        files,
     })
 }
 

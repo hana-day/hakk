@@ -11,6 +11,7 @@ mod backend;
 mod content;
 mod locate;
 mod manifest;
+mod raw;
 mod rng;
 mod runner;
 mod scenario;
