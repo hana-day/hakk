@@ -8,7 +8,7 @@ use anyhow::Result;
 use super::{Backend, Mounted, run, temp_mount_dir};
 use crate::scenario::FsKind;
 
-/// `mkfs.exfat` とループバックマウント（`sudo mount -o loop`）。CI 用。
+/// `mkfs.exfat` and a loop mount (`sudo mount -o loop`). For CI.
 pub struct Loop;
 
 impl Backend for Loop {

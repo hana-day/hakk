@@ -1,15 +1,15 @@
-//! 開発用のタスク。
+//! Development tasks.
 //!
-//! `cargo xtask bench [シナリオ.toml ...]`
-//!   シナリオからイメージを生成し、各復元ツールで復元して採点する。
-//!   シナリオを省略すると `scenarios/*.toml` をすべて使う。
-//!   結果は `work/bench/<シナリオ>/` に置き、まとめを `work/bench/summary.json` に書く。
+//! `cargo xtask bench [scenario.toml ...]`
+//!   Generates images from scenarios, recovers them with each tool, and scores the results.
+//!   Without arguments, every `scenarios/*.toml` is used.
+//!   Results go to `work/bench/<scenario>/`, with a summary in `work/bench/summary.json`.
 //!
-//! 復元ツール：
-//! - `naive`：比較の基準にする最小限の自作カーバー（`carver::naive`）
-//! - `photorec`：PATH に `photorec` があれば外部コマンドとして実行する
+//! Recovery tools:
+//! - `naive`: our minimal baseline carver (`carver::naive`)
+//! - `photorec`: run as an external command if `photorec` is on PATH
 
-// 開発用ツールで、扱う値は小さいので桁落ちの lint は外す
+// A development tool handling small values; truncation lints are noise here.
 #![allow(clippy::cast_possible_truncation)]
 
 use std::{
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.split_first() {
         Some((cmd, rest)) if cmd == "bench" => bench(rest),
-        _ => bail!("使い方: cargo xtask bench [シナリオ.toml ...]"),
+        _ => bail!("usage: cargo xtask bench [scenario.toml ...]"),
     }
 }
 
@@ -59,28 +59,26 @@ fn bench(args: &[String]) -> Result<()> {
     let bin = root.join("target/release");
     let photorec = which("photorec");
     if photorec.is_none() {
-        eprintln!(
-            "photorec が見つからないので省略する（brew install testdisk / apt install testdisk）"
-        );
+        eprintln!("photorec not found, skipping it (brew install testdisk / apt install testdisk)");
     }
 
     let mut reports = Vec::new();
     for sc in &scenarios {
         let name = sc
             .file_stem()
-            .context("シナリオのファイル名が不正")?
+            .context("invalid scenario file name")?
             .to_string_lossy()
             .into_owned();
         let dir = Path::new(WORK).join(&name);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
-        eprintln!("== {name}: イメージを生成");
+        eprintln!("== {name}: generating image");
         run(Command::new(bin.join("hakk-scenario")).arg(sc).arg(&dir))?;
         let image = dir.join("image.img");
         let manifest = dir.join("manifest.json");
 
-        // 自作の最小限のカーバー
+        // Our minimal baseline carver.
         let out = dir.join("naive");
         let started = Instant::now();
         naive(&image, &out)?;
@@ -89,10 +87,10 @@ fn bench(args: &[String]) -> Result<()> {
 
         if let Some(photorec) = &photorec {
             let out = dir.join("photorec");
-            // 出力先の親ディレクトリが無いと、PhotoRec は何も書き出さずに終わる
+            // PhotoRec silently writes nothing if the output's parent directory is missing.
             fs::create_dir_all(&out)?;
             let started = Instant::now();
-            // 出力先は recup_dir.1 のように番号が付く。ログはカレントに出るので出力先に移す
+            // Output dirs get a numeric suffix (recup.1). The log lands in the cwd; move it.
             run(Command::new(photorec)
                 .arg("/log")
                 .arg("/d")
@@ -104,7 +102,7 @@ fn bench(args: &[String]) -> Result<()> {
             if Path::new("photorec.log").exists() {
                 fs::rename("photorec.log", dir.join("photorec.log"))?;
             }
-            // 出力先に書かれる実行記録は復元ファイルではないので外す
+            // The run report written next to the output is not a recovered file; move it away.
             for e in fs::read_dir(&out)? {
                 let report = e?.path().join("report.xml");
                 if report.exists() {
@@ -123,7 +121,7 @@ fn bench(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// 最小限のカーバーで復元し、`out` に書き出す。
+/// Recovers with the minimal carver, writing files to `out`.
 fn naive(image: &Path, out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
     let src = ImageFile::open(image)?;
@@ -158,29 +156,10 @@ fn evaluate(
 
 fn print_summary(reports: &[serde_json::Value]) {
     println!();
-    let header = [
-        "シナリオ",
-        "ツール",
-        "完全復元",
-        "断片化",
-        "誤検出",
-        "MB/秒",
-    ];
-    let widths: [usize; 6] = [14, 10, 10, 8, 8, 8];
-    let row = |cells: &[String]| {
-        let mut line = String::new();
-        for (i, (c, w)) in cells.iter().zip(widths).enumerate() {
-            // 先頭2列は左寄せ、数値は右寄せ。全角は2桁として数える
-            let pad = " ".repeat(w.saturating_sub(display_width(c)));
-            if i < 2 {
-                line.push_str(&format!("{c}{pad} "));
-            } else {
-                line.push_str(&format!("{pad}{c} "));
-            }
-        }
-        println!("{}", line.trim_end());
-    };
-    row(&header.map(str::to_owned));
+    println!(
+        "{:<14} {:<10} {:>10} {:>10} {:>8} {:>8}",
+        "scenario", "tool", "complete", "fragment", "false+", "MB/s"
+    );
     for r in reports {
         let n = |k: &str| r.get(k).and_then(serde_json::Value::as_u64).unwrap_or(0);
         let s = |k: &str| {
@@ -193,22 +172,16 @@ fn print_summary(reports: &[serde_json::Value]) {
             .get("mb_per_sec")
             .and_then(serde_json::Value::as_f64)
             .map_or("-".to_owned(), |v| format!("{v:.0}"));
-        row(&[
+        println!(
+            "{:<14} {:<10} {:>10} {:>10} {:>8} {:>8}",
             s("scenario"),
             s("tool"),
             format!("{}/{}", n("complete"), n("targets")),
             format!("{}/{}", n("fragmented_complete"), n("fragmented_targets")),
-            n("false_positives_or_unknown").to_string(),
+            n("false_positives_or_unknown"),
             speed,
-        ]);
+        );
     }
-}
-
-/// 端末での表示幅（全角を2とするおおよその値）。
-fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| if u32::from(c) >= 0x1100 { 2 } else { 1 })
-        .sum()
 }
 
 fn workspace_root() -> Result<PathBuf> {
@@ -221,7 +194,7 @@ fn workspace_root() -> Result<PathBuf> {
     Path::new(out.trim())
         .parent()
         .map(Path::to_path_buf)
-        .context("ワークスペースのルートが分からない")
+        .context("cannot find the workspace root")
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -235,10 +208,10 @@ fn which(name: &str) -> Option<PathBuf> {
 fn run(cmd: &mut Command) -> Result<String> {
     let out = cmd
         .output()
-        .with_context(|| format!("{cmd:?} を起動できない"))?;
+        .with_context(|| format!("cannot start {cmd:?}"))?;
     if !out.status.success() {
         bail!(
-            "{cmd:?} が失敗した（{}）: {}{}",
+            "{cmd:?} failed ({}): {}{}",
             out.status,
             String::from_utf8_lossy(&out.stdout).trim(),
             String::from_utf8_lossy(&out.stderr).trim()

@@ -1,4 +1,4 @@
-//! シナリオ（ディスクの「歴史」）の定義。TOML で書く。
+//! Scenario definition: the "history" of a disk, written in TOML.
 
 use std::{fs, path::Path};
 
@@ -12,7 +12,7 @@ use crate::size::Size;
 pub struct Scenario {
     pub name: String,
     pub seed: u64,
-    /// イメージ全体の大きさ。
+    /// Size of the whole image.
     pub size: Size,
     pub fs: FsKind,
     pub steps: Vec<Step>,
@@ -27,7 +27,7 @@ pub enum FsKind {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Step {
-    /// ファイルを書き込む。
+    /// Write files.
     Write {
         count: u32,
         kind: ContentKind,
@@ -36,15 +36,15 @@ pub enum Step {
         #[serde(default = "default_dir")]
         dir: String,
     },
-    /// 残っているファイルからシードに従って選んで削除する。
+    /// Delete live files picked by the seed.
     Delete {
-        /// 残っているファイルのうち削除する割合（0.0〜1.0）。
+        /// Fraction of live files to delete (0.0 to 1.0).
         fraction: f64,
-        /// 指定すると、このフォルダ（の下）にあるファイルだけから選ぶ。
+        /// If set, only pick files under this directory.
         #[serde(default)]
         dir: Option<String>,
     },
-    /// クイックフォーマット（全ファイルが削除扱いになる）。
+    /// Quick format (every file counts as deleted).
     Format,
 }
 
@@ -62,16 +62,16 @@ fn default_dir() -> String {
 impl Scenario {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
-            fs::read_to_string(path).with_context(|| format!("{} を読めない", path.display()))?;
+            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
         let sc: Self =
-            toml::from_str(&text).with_context(|| format!("{} の形式が不正", path.display()))?;
+            toml::from_str(&text).with_context(|| format!("{} is malformed", path.display()))?;
         sc.validate()?;
         Ok(sc)
     }
 
     fn validate(&self) -> Result<()> {
         if self.size.0 < 8 << 20 {
-            bail!("イメージは 8MiB 以上にする");
+            bail!("image size must be at least 8MiB");
         }
         for (i, step) in self.steps.iter().enumerate() {
             match step {
@@ -82,12 +82,14 @@ impl Scenario {
                         bail!("steps[{i}]: min_size > max_size");
                     }
                     if min_size.0 < 4096 {
-                        bail!("steps[{i}]: min_size は 4KiB 以上にする（配置の特定に必要）");
+                        bail!(
+                            "steps[{i}]: min_size must be at least 4KiB (needed to locate files)"
+                        );
                     }
                 }
                 Step::Delete { fraction, .. } => {
                     if !(0.0..=1.0).contains(fraction) {
-                        bail!("steps[{i}]: fraction は 0.0〜1.0");
+                        bail!("steps[{i}]: fraction must be within 0.0..=1.0");
                     }
                 }
                 Step::Format => {}

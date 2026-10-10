@@ -1,9 +1,9 @@
 use crate::{BlockSource, ReadError, clamp_usize, readable_len};
 
-/// 任意の位置・長さの読み込みを、セクタ境界に揃えた読み込みに変換する。
+/// Turns reads at any offset/length into sector-aligned reads.
 ///
-/// 生デバイスは位置と長さがセクタの倍数でない読み込みを受け付けないため、
-/// その上に被せて使う。すでに揃っている読み込みはそのまま通す。
+/// Raw devices reject reads whose offset or length is not a multiple of the sector size,
+/// so wrap them in this. Reads that are already aligned pass straight through.
 #[derive(Debug)]
 pub struct Aligned<S> {
     inner: S,
@@ -44,7 +44,7 @@ impl<S: BlockSource> BlockSource for Aligned<S> {
             return self.inner.read_at(offset, dst);
         }
 
-        // 前後をセクタ境界まで広げて読み、必要な部分だけ写す
+        // Widen to sector boundaries on both ends, then copy out just the requested part.
         let start = offset / ss * ss;
         let aligned_end = end.div_ceil(ss) * ss;
         let mut bounce = vec![0u8; clamp_usize(aligned_end - start)];

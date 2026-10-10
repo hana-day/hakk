@@ -10,10 +10,10 @@ use anyhow::{Context, Result, bail};
 use super::{Backend, Mounted, run};
 use crate::scenario::FsKind;
 
-/// `hdiutil` でイメージをディスクとして接続する。
+/// Attaches images as disks with `hdiutil`.
 pub struct Hdiutil;
 
-/// 区画表のない生イメージとして接続するための指定。
+/// Attach as a raw image without a partition table.
 const RAW: [&str; 2] = ["-imagekey", "diskimage-class=CRawDiskImage"];
 
 impl Backend for Hdiutil {
@@ -26,7 +26,7 @@ impl Backend for Hdiutil {
     }
 
     fn mount(&self, image: &Path) -> Result<Box<dyn Mounted>> {
-        // マウント先を自分で指定すると書き込めない（fskit の所有者の扱い）ので、既定の /Volumes を使う
+        // Custom mount points end up unwritable (fskit ownership handling), so use the default /Volumes.
         let out = run(Command::new("hdiutil")
             .arg("attach")
             .args(RAW)
@@ -43,10 +43,10 @@ impl Backend for Hdiutil {
                 root = Some(PathBuf::from(m));
             }
         }
-        let dev = dev.context("hdiutil attach の出力にデバイスがない")?;
+        let dev = dev.context("no device in hdiutil attach output")?;
         let Some(root) = root else {
             detach(&dev)?;
-            bail!("ボリュームがマウントされなかった: {out}");
+            bail!("volume was not mounted: {out}");
         };
         Ok(Box::new(Volume { dev, root }))
     }
@@ -77,10 +77,10 @@ fn attach_nomount(image: &Path) -> Result<String> {
         .next()
         .filter(|d| d.starts_with("/dev/disk"))
         .map(str::to_owned)
-        .context("hdiutil attach の出力にデバイスがない")
+        .context("no device in hdiutil attach output")
 }
 
-/// 切り離す。直後は使用中で失敗することがあるので、少し待って再試行する。
+/// Detaches. Right after use it may still be busy, so retry after a short wait.
 fn detach(dev: &str) -> Result<()> {
     let mut last = None;
     for attempt in 0..5 {
@@ -90,8 +90,8 @@ fn detach(dev: &str) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(500 * (attempt + 1)));
     }
-    // 最後の手段。書き込みは各ファイルで fsync 済み
+    // Last resort. Every file was already fsynced.
     run(Command::new("hdiutil").args(["detach", "-force", dev]))
         .map(drop)
-        .with_context(|| format!("{dev} を切り離せない: {last:?}"))
+        .with_context(|| format!("cannot detach {dev}: {last:?}"))
 }

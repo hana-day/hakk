@@ -1,7 +1,7 @@
-//! テスト用ファイルの中身を、シードから決定的に作る。
+//! Deterministic test file content from a seed.
 //!
-//! どのファイルも 512 バイトごとの中身がほぼ一意になるようにする（配置を中身の照合で
-//! 特定するため）。そのために圧縮データ・サンプルデータは乱数で埋める。
+//! Every file is made so its 512-byte blocks are (nearly) unique, so that placement can be
+//! found by matching content. Compressed data and samples are therefore random bytes.
 
 mod exif;
 mod jpeg;
@@ -13,13 +13,13 @@ use crate::{rng::Rng, scenario::ContentKind};
 
 pub use exif::Exif;
 
-/// 生成したファイル。
+/// A generated file.
 pub struct Generated {
     pub bytes: Vec<u8>,
     pub meta: Meta,
 }
 
-/// 正解マニフェストに残すメタデータ（ファイル名の復元などの評価に使う）。
+/// Metadata kept in the manifest (used to evaluate e.g. file naming).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Meta {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,12 +28,12 @@ pub struct Meta {
     pub width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
-    /// 動画のサンプル数。
+    /// Number of video samples.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub samples: Option<u32>,
 }
 
-/// おおよそ `target` バイトのファイルを作る（大きさは目安。種類により前後する）。
+/// Makes a file of roughly `target` bytes (approximate; varies by kind).
 pub fn generate(kind: ContentKind, target: u64, rng: &mut Rng) -> anyhow::Result<Generated> {
     match kind {
         ContentKind::Jpeg => jpeg::generate(target, rng),

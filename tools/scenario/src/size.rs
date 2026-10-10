@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, de};
 
-/// "64MiB" "100KiB" "1GiB" "4096" のような大きさの指定。
+/// A size such as "64MiB", "100KiB", "1GiB" or "4096".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Size(pub u64);
 
@@ -31,9 +31,8 @@ impl<'de> Deserialize<'de> for Size {
         }
         match Raw::deserialize(d)? {
             Raw::Num(n) => Ok(Size(n)),
-            Raw::Str(s) => Size::parse(&s).ok_or_else(|| {
-                de::Error::custom(format!("大きさの指定が不正: {s:?}（例: \"64MiB\"）"))
-            }),
+            Raw::Str(s) => Size::parse(&s)
+                .ok_or_else(|| de::Error::custom(format!("invalid size: {s:?} (e.g. \"64MiB\")"))),
         }
     }
 }

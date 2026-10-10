@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "開発用のタスク（ベンチマークなど）"
+description = "Development tasks (benchmarks, etc.)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

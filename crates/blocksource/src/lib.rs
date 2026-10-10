@@ -1,13 +1,13 @@
-//! 読み込み層の抽象化。
+//! Read layer abstraction.
 //!
-//! 対象ディスクの読み込みはすべてこのクレートの [`BlockSource`] を経由する。
-//! 書き込みの手段は一切提供しない（元ディスクへの書き込みを型の上で不可能にする）。
+//! Every read from a target disk goes through [`BlockSource`]. This crate offers
+//! no way to write, so writing to the source disk is impossible at the type level.
 //!
-//! - [`ImageFile`]：ディスクイメージ（ファイル）
-//! - [`Device`]：物理ディスク・ボリュームの生デバイス
-//! - [`MemSource`]：メモリ上のバッファ（テスト用）
-//! - [`Aligned`]：任意の位置・長さの読み込みを、セクタ境界に揃えた読み込みに変換する
-//! - [`sim`]：物理条件のシミュレーション（不良セクタ・遅延・シークコスト）
+//! - [`ImageFile`]: a disk image (regular file)
+//! - [`Device`]: a raw physical disk or volume device
+//! - [`MemSource`]: an in-memory buffer (for tests)
+//! - [`Aligned`]: turns reads at any offset/length into sector-aligned reads
+//! - [`sim`]: simulation of physical conditions (bad sectors, latency, seek cost)
 
 mod aligned;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
@@ -27,30 +27,33 @@ pub use error::{ReadError, ReadErrorKind};
 pub use image::ImageFile;
 pub use mem::MemSource;
 
-/// 読み取り専用のブロックデバイス。
+/// A read-only block device.
 ///
-/// # 契約
+/// # Contract
 ///
-/// - `read_at` は `offset` から最大 `buf.len()` バイトを読み、読めたバイト数を返す。
-///   `buf.len()` より少なくなるのは終端に達した場合だけ（`offset >= len()` なら `Ok(0)`）。
-/// - 失敗した場合 `buf` の内容は不定。[`ReadError::range`] に読めなかった範囲を入れる。
-///   この範囲はセクタ境界まで広がることがあり、要求範囲に収まるとは限らない。
-/// - `&self` で読むので、複数スレッドから同時に呼べる。
+/// - `read_at` reads up to `buf.len()` bytes starting at `offset` and returns the number
+///   of bytes read. It returns fewer than `buf.len()` only at the end of the source
+///   (`Ok(0)` if `offset >= len()`).
+/// - On failure the contents of `buf` are unspecified. [`ReadError::range`] holds the
+///   range that could not be read; it may be widened to sector boundaries and is not
+///   guaranteed to lie within the requested range.
+/// - Reads take `&self`, so they may be issued from multiple threads concurrently.
 pub trait BlockSource: Send + Sync {
-    /// 全体の大きさ（バイト）。
+    /// Total size in bytes.
     fn len(&self) -> u64;
 
-    /// 論理セクタの大きさ（バイト）。2のべき乗。
+    /// Logical sector size in bytes. Always a power of two.
     fn sector_size(&self) -> u32;
 
-    /// `offset` から読む。詳細はトレイトの説明を参照。
+    /// Reads at `offset`. See the trait documentation for details.
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, ReadError>;
 
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// `buf` を満たすまで読む。終端に達して満たせなければ [`ReadErrorKind::UnexpectedEof`]。
+    /// Reads until `buf` is full. Fails with [`ReadErrorKind::UnexpectedEof`] if the end
+    /// of the source is reached first.
     fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), ReadError> {
         let n = self.read_at(offset, buf)?;
         if n == buf.len() {
@@ -80,13 +83,13 @@ macro_rules! forward_impl {
 }
 forward_impl!(&T, Box<T>, Arc<T>);
 
-/// `offset` から読める長さを `buf_len` で頭打ちにしたもの。
+/// The number of bytes readable at `offset`, capped at `buf_len`.
 pub(crate) fn readable_len(source_len: u64, offset: u64, buf_len: usize) -> usize {
     clamp_usize(source_len.saturating_sub(offset)).min(buf_len)
 }
 
-/// `u64` を `usize` に変換する。収まらなければ `usize::MAX`。
-/// 結果を必ずバッファ長などと `min` を取る場面でだけ使う。
+/// Converts `u64` to `usize`, saturating at `usize::MAX`.
+/// Only use where the result is then `min`-ed with a buffer length or similar.
 pub(crate) fn clamp_usize(x: u64) -> usize {
     usize::try_from(x).unwrap_or(usize::MAX)
 }
@@ -94,6 +97,6 @@ pub(crate) fn clamp_usize(x: u64) -> usize {
 pub(crate) fn assert_sector_size(sector_size: u32) {
     assert!(
         sector_size.is_power_of_two(),
-        "セクタサイズは2のべき乗でなければならない: {sector_size}"
+        "sector size must be a power of two: {sector_size}"
     );
 }

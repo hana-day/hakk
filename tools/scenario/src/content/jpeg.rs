@@ -1,8 +1,10 @@
-//! 写真（JPEG）の生成。
+//! Photo (JPEG) generation.
 //!
-//! 乱数ノイズの画像を `image` クレートで JPEG に符号化し、SOI の直後に EXIF（APP1）と
-//! 乱数入りのコメント（COM）を差し込む。ノイズの圧縮データは乱数同然なので、
-//! 512 バイトごとの中身が一意になる。
+//! Encodes a random-noise image with the `image` crate and inserts EXIF (APP1) and a
+//! random comment (COM) right after SOI. Compressed noise is effectively random, so each
+//! 512-byte block is unique.
+//!
+//! Reference: ITU-T T.81 Annex B (SOI, APPn, COM segments).
 
 use anyhow::Result;
 use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
@@ -10,11 +12,11 @@ use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 use super::{Generated, Meta, exif::Exif};
 use crate::rng::Rng;
 
-/// ノイズ画像を品質 90 で符号化したときの、1画素あたりのおおよそのバイト数。
+/// Approximate bytes per pixel when encoding noise at quality 90.
 const BYTES_PER_PIXEL: f64 = 1.6;
 
 pub fn generate(target: u64, rng: &mut Rng) -> Result<Generated> {
-    // 3:2 の画像で、おおよそ target バイトになる大きさ（16の倍数）
+    // A 3:2 image of roughly `target` bytes (dimensions multiples of 16).
     let pixels = target as f64 / BYTES_PER_PIXEL;
     let height = ((pixels / 1.5).sqrt() as u32 / 16).max(1) * 16;
     let width = (height * 3 / 2 / 16).max(1) * 16;
@@ -47,7 +49,7 @@ pub fn generate(target: u64, rng: &mut Rng) -> Result<Generated> {
     })
 }
 
-/// 乱数入りの COM セグメント。長さも乱数にして、後ろに続く量子化表などの位置をずらす。
+/// A random COM segment. Its length is random too, shifting the tables that follow.
 fn comment(rng: &mut Rng) -> Vec<u8> {
     let len = rng.range(600, 1500) as usize;
     let mut seg = vec![0xFF, 0xFE];
@@ -66,7 +68,7 @@ mod tests {
         let img = image::load_from_memory_with_format(&g.bytes, image::ImageFormat::Jpeg).unwrap();
         assert_eq!(Some(img.width()), g.meta.width);
         assert_eq!(Some(img.height()), g.meta.height);
-        // SOI の直後が EXIF の APP1
+        // EXIF APP1 right after SOI.
         assert_eq!(&g.bytes[..4], &[0xFF, 0xD8, 0xFF, 0xE1]);
         assert_eq!(&g.bytes[6..12], b"Exif\0\0");
         let exif = g.meta.exif.unwrap();
@@ -79,7 +81,7 @@ mod tests {
             tiff.windows(19)
                 .any(|w| w == exif.date_time_original.as_bytes())
         );
-        // 大きさはおおよそ目標どおり
+        // The size is roughly on target.
         let ratio = g.bytes.len() as f64 / 300_000.0;
         assert!((0.6..1.6).contains(&ratio), "{ratio}");
     }

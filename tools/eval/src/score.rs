@@ -1,14 +1,16 @@
-//! 採点。
+//! Scoring.
 //!
-//! # 用語
+//! # Terms
 //!
-//! - **対象**：削除済みで、中身が上書きされずに完全に残っているファイル。復元率の分母
-//! - **完全復元**：SHA-256 が一致する復元ファイルがある
-//! - **部分復元**：完全一致はないが、512 バイトのブロックが同じ位置で一致する復元ファイルがある。
-//!   対象のブロックのうち最も多く一致した割合を「ブロック一致率」とする
-//! - **上書き済み**：削除済みで一部が上書きされたファイル。分母には入れず、件数だけ示す
-//! - **誤検出・不明**：どのファイルとも一致しない復元ファイル。上書き済みファイルの断片を
-//!   復元したものもここに入る（上書き前の中身はマニフェストからは分からないため）
+//! - **Target**: a deleted file whose content is fully intact (not overwritten). The
+//!   denominator of the recovery rate.
+//! - **Complete**: some recovered file has the same SHA-256.
+//! - **Partial**: no exact match, but some recovered file has 512-byte blocks matching at
+//!   the same offsets. The best fraction of the target's blocks matched is its "block ratio".
+//! - **Damaged**: a deleted file that was partly overwritten. Not in the denominator; only
+//!   counted.
+//! - **False positive or unknown**: a recovered file matching no file at all. Recoveries of
+//!   damaged files land here too (their pre-overwrite content is not in the manifest).
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -57,12 +59,12 @@ struct Extent {
 impl Manifest {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
-            fs::read_to_string(path).with_context(|| format!("{} を読めない", path.display()))?;
+            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
         let m: Self = serde_json::from_str(&text)
-            .with_context(|| format!("{} の形式が不正", path.display()))?;
+            .with_context(|| format!("{} is malformed", path.display()))?;
         if m.version != MANIFEST_VERSION {
             bail!(
-                "マニフェストの版 {} には対応していない（{MANIFEST_VERSION} のみ）",
+                "unsupported manifest version {} (only {MANIFEST_VERSION})",
                 m.version
             );
         }
@@ -93,24 +95,24 @@ pub struct Report {
     tool: String,
     scenario: String,
     seed: u64,
-    /// 復元率の分母（削除済みで中身が完全に残っているファイル）。
+    /// Denominator of the recovery rate (deleted files that are fully intact).
     targets: usize,
     complete: usize,
     complete_rate: f64,
     partial: usize,
-    /// 対象ごとのブロック一致率の平均（完全復元は 1.0、見つからなければ 0.0）。
+    /// Mean block ratio over targets (1.0 when complete, 0.0 when not found).
     mean_block_ratio: f64,
-    /// 完全復元のうち、元のファイル名で復元できた件数。
+    /// Complete recoveries that kept the original file name.
     names: usize,
     fragmented_targets: usize,
     fragmented_complete: usize,
     by_kind: BTreeMap<String, KindScore>,
-    /// 削除済みで一部が上書きされたファイル（分母に入れない）。
+    /// Deleted files that were partly overwritten (not in the denominator).
     damaged: usize,
-    /// 残っているファイルのうち完全復元されたもの（カービングは残っているファイルも見つける）。
+    /// Live files recovered completely (carving finds live files too).
     live_complete: usize,
     recovered_files: usize,
-    /// 同じファイルを2回以上完全復元した余分な件数。
+    /// Extra complete recoveries of an already recovered file.
     duplicates: usize,
     false_positives_or_unknown: usize,
     elapsed_secs: Option<f64>,
@@ -130,7 +132,7 @@ struct Detail {
     path: String,
     result: Outcome,
     block_ratio: f64,
-    /// 完全復元したファイル（復元結果のディレクトリからの相対パス）。
+    /// The complete recovery (path relative to the recovered dir).
     #[serde(skip_serializing_if = "Option::is_none")]
     recovered_as: Option<String>,
 }
@@ -156,16 +158,16 @@ impl Report {
             .unwrap_or(Path::new("."))
             .join(&m.image);
         let image = fs::read(&image_path)
-            .with_context(|| format!("{} を読めない", image_path.display()))?;
+            .with_context(|| format!("cannot read {}", image_path.display()))?;
 
-        // 中身が完全に残っているファイルの中身を、イメージから組み立てる
+        // Rebuild the content of fully intact files from the image.
         let contents: Vec<Option<Vec<u8>>> = m
             .files
             .iter()
             .map(|f| f.intact().then(|| assemble(&image, f)).flatten())
             .collect();
 
-        // ブロック → (ファイル番号, ブロック番号)
+        // block -> (file index, block index)
         let mut index: HashMap<&[u8], Vec<(usize, usize)>> = HashMap::new();
         for (fi, c) in contents.iter().enumerate() {
             let Some(c) = c else { continue };
@@ -188,7 +190,7 @@ impl Report {
         let mut false_positives = 0;
         let recovered = walk(recovered_dir)?;
         for path in &recovered {
-            let data = fs::read(path).with_context(|| format!("{} を読めない", path.display()))?;
+            let data = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
             let rel = path
                 .strip_prefix(recovered_dir)
                 .unwrap_or(path)
@@ -207,7 +209,7 @@ impl Report {
                 continue;
             }
 
-            // 同じ位置で一致するブロックを数える
+            // Count blocks matching at the same offset.
             let mut hits: HashMap<usize, usize> = HashMap::new();
             for (k, b) in data.chunks_exact(BLOCK).enumerate() {
                 for &(fi, bk) in index.get(b).into_iter().flatten() {
@@ -332,12 +334,12 @@ impl Report {
         let mut s = String::new();
         let _ = writeln!(
             s,
-            "[{}] シナリオ {}（seed {}）",
+            "[{}] scenario {} (seed {})",
             self.tool, self.scenario, self.seed
         );
         let _ = writeln!(
             s,
-            "  完全復元       {:>4} / {:<4} {:>7}",
+            "  complete       {:>4} / {:<4} {:>7}",
             self.complete,
             self.targets,
             pct(self.complete, self.targets)
@@ -353,39 +355,43 @@ impl Report {
         }
         let _ = writeln!(
             s,
-            "    断片化       {:>4} / {:<4} {:>7}",
+            "    fragmented   {:>4} / {:<4} {:>7}",
             self.fragmented_complete,
             self.fragmented_targets,
             pct(self.fragmented_complete, self.fragmented_targets)
         );
-        let _ = writeln!(s, "  部分復元       {:>4}", self.partial);
+        let _ = writeln!(s, "  partial        {:>4}", self.partial);
         let _ = writeln!(
             s,
-            "  ブロック一致率 {:>11.1}%",
+            "  block ratio    {:>11.1}%",
             self.mean_block_ratio * 100.0
         );
         let _ = writeln!(
             s,
-            "  ファイル名     {:>4} / {:<4}",
+            "  names          {:>4} / {:<4}",
             self.names, self.complete
         );
         let _ = writeln!(
             s,
-            "  復元ファイル   {:>4}（重複 {}、誤検出・不明 {}、残っているファイル {}）",
+            "  recovered      {:>4} (duplicates {}, false positives/unknown {}, live files {})",
             self.recovered_files,
             self.duplicates,
             self.false_positives_or_unknown,
             self.live_complete
         );
-        let _ = writeln!(s, "  上書き済み     {:>4}（分母に含めない）", self.damaged);
+        let _ = writeln!(
+            s,
+            "  damaged        {:>4} (not in the denominator)",
+            self.damaged
+        );
         if let (Some(t), Some(r)) = (self.elapsed_secs, self.mb_per_sec) {
-            let _ = writeln!(s, "  速度           {r:>8.1} MB/秒（{t:.2} 秒）");
+            let _ = writeln!(s, "  speed          {r:>8.1} MB/s ({t:.2}s)");
         }
         s
     }
 }
 
-/// 中身が完全に残っているファイルを、配置に従ってイメージから組み立てる。
+/// Rebuilds a fully intact file from the image using its extents.
 fn assemble(image: &[u8], f: &FileEntry) -> Option<Vec<u8>> {
     let mut out = vec![0u8; usize::try_from(f.size).ok()?];
     for e in f.extents.as_ref()? {
@@ -400,12 +406,12 @@ fn assemble(image: &[u8], f: &FileEntry) -> Option<Vec<u8>> {
     (hex(&Sha256::digest(&out)) == f.sha256).then_some(out)
 }
 
-/// ディレクトリ以下の通常ファイルを、パス順に列挙する。
+/// Lists regular files under a directory, sorted by path.
 fn walk(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for e in fs::read_dir(&d).with_context(|| format!("{} を読めない", d.display()))? {
+        for e in fs::read_dir(&d).with_context(|| format!("cannot read {}", d.display()))? {
             let e = e?;
             let ty = e.file_type()?;
             if ty.is_dir() {

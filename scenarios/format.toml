@@ -1,4 +1,4 @@
-# クイックフォーマット：書き込んだ後にフォーマットし、少し書き足す
+# Quick format: write files, quick-format the volume, then write a few more.
 name = "format"
 seed = 2
 size = "64MiB"

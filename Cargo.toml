@@ -6,7 +6,7 @@ members = ["crates/blocksource", "crates/carver", "tools/scenario", "tools/eval"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.97"
-# ライセンス未決（すべての権利を留保）。決定するまで license は書かない
+# License undecided (all rights reserved). Do not set `license` until it is decided.
 publish = false
 
 [workspace.lints.rust]

@@ -1,8 +1,8 @@
 use std::{error::Error, fmt, io, ops::Range};
 
-/// 読み取りの失敗。読めなかった範囲を持つ。
+/// A failed read, carrying the range that could not be read.
 ///
-/// 上位の層はこの範囲を不良セクタとして記録し、先へ進む（最後にまとめてリトライする）。
+/// Upper layers record this range as bad sectors and move on (retrying them all at the end).
 #[derive(Debug)]
 pub struct ReadError {
     range: Range<u64>,
@@ -12,13 +12,13 @@ pub struct ReadError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ReadErrorKind {
-    /// OSが返した入出力エラー（不良セクタなど）。
+    /// An I/O error reported by the OS (e.g. a bad sector).
     Io(io::Error),
-    /// 応答がなかった。
+    /// The device did not respond.
     Timeout,
-    /// セクタ境界に揃っていない読み込みを、デバイスが受け付けなかった。
+    /// The device rejected a read that was not aligned to sector boundaries.
     Misaligned,
-    /// 終端に達して、要求した長さを読めなかった。
+    /// The end of the source was reached before the requested length was read.
     UnexpectedEof,
 }
 
@@ -27,7 +27,7 @@ impl ReadError {
         Self { range, kind }
     }
 
-    /// 読めなかった範囲（バイト）。
+    /// The byte range that could not be read.
     pub fn range(&self) -> Range<u64> {
         self.range.clone()
     }
@@ -44,12 +44,12 @@ impl ReadError {
 impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Range { start, end } = self.range;
-        write!(f, "{start:#x}..{end:#x} の読み取りに失敗: ")?;
+        write!(f, "failed to read {start:#x}..{end:#x}: ")?;
         match &self.kind {
             ReadErrorKind::Io(e) => write!(f, "{e}"),
-            ReadErrorKind::Timeout => f.write_str("タイムアウト"),
-            ReadErrorKind::Misaligned => f.write_str("セクタ境界に揃っていない"),
-            ReadErrorKind::UnexpectedEof => f.write_str("終端に達した"),
+            ReadErrorKind::Timeout => f.write_str("timed out"),
+            ReadErrorKind::Misaligned => f.write_str("not aligned to sector boundaries"),
+            ReadErrorKind::UnexpectedEof => f.write_str("unexpected end of source"),
         }
     }
 }

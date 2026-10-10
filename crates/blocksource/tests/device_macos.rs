@@ -1,7 +1,7 @@
-//! 物理ディスク経路のテスト（macOS）。
+//! Physical disk path test (macOS).
 //!
-//! `hdiutil attach -nomount` でイメージを生デバイスとして接続し、本番と同じ
-//! [`Device`] のコードで読む。ディスクを接続するので既定では実行しない：
+//! Attaches an image as a raw device with `hdiutil attach -nomount` and reads it with the
+//! same [`Device`] code as in production. Ignored by default since it attaches a disk:
 //! `cargo test -p blocksource -- --ignored`
 #![cfg(target_os = "macos")]
 #![allow(
@@ -14,7 +14,7 @@ use std::{io::Write, path::Path, process::Command};
 
 use blocksource::{Aligned, BlockSource, Device, ImageFile, ReadErrorKind};
 
-/// 接続したディスク。drop で切り離す。
+/// An attached disk, detached on drop.
 struct Attached {
     disk: String,
 }
@@ -72,7 +72,7 @@ fn pattern(len: usize) -> Vec<u8> {
 }
 
 #[test]
-#[ignore = "hdiutil でディスクを接続する"]
+#[ignore = "attaches a disk with hdiutil"]
 fn raw_device_matches_image() {
     let data = pattern(8 << 20);
     let mut img = tempfile::NamedTempFile::new().unwrap();
@@ -84,24 +84,24 @@ fn raw_device_matches_image() {
     assert_eq!(dev.len(), data.len() as u64);
     assert_eq!(dev.sector_size(), 512);
 
-    // 揃った読み込みはそのまま読める
+    // Aligned reads work as is.
     let mut buf = vec![0; 1 << 20];
     for off in [0u64, 512, 3 << 20, (8 << 20) - (1 << 20)] {
         dev.read_exact_at(off, &mut buf).unwrap();
         assert_eq!(buf, data[off as usize..off as usize + buf.len()]);
     }
 
-    // 揃っていない読み込みは OS に渡さず拒否する
+    // Misaligned reads are rejected without reaching the OS.
     let err = dev.read_at(1, &mut [0; 512]).unwrap_err();
     assert!(matches!(err.kind(), ReadErrorKind::Misaligned));
     let err = dev.read_at(0, &mut [0; 100]).unwrap_err();
     assert!(matches!(err.kind(), ReadErrorKind::Misaligned));
 
-    // 終端をまたぐ読み込みは短く返る
+    // Reads crossing the end are short.
     let n = dev.read_at((8 << 20) - 512, &mut [0; 4096]).unwrap();
     assert_eq!(n, 512);
 
-    // Aligned を被せれば、任意の位置・長さでイメージファイルと同じ結果になる
+    // Through Aligned, any offset/length matches reading the image file.
     let aligned = Aligned::new(&dev);
     let image = ImageFile::open(img.path()).unwrap();
     let mut seed = 1u64;

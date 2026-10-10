@@ -1,9 +1,9 @@
 /target/
 
-# 設計資料（ローカルのみ）
+# Design notes (local only)
 /.tmp/
 
-# テスト素材・生成イメージはGitに入れない
+# Test media and generated images stay out of Git
 /samples/
 /work/
 *.img
@@ -15,7 +15,7 @@
 
 .DS_Store
 
-# Claude 関連（ローカルのみ）
+# Claude-related files (local only)
 /CLAUDE.md
 /CLAUDE.local.md
 /.claude/

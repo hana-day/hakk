@@ -1,4 +1,4 @@
-//! シナリオを実行してイメージと正解マニフェストを作る。
+//! Runs a scenario to produce the image and its ground-truth manifest.
 
 use std::{
     fs::{self, File},
@@ -21,7 +21,7 @@ use crate::{
 
 pub const IMAGE_NAME: &str = "image.img";
 
-/// 実行中のファイル。中身は最後の照合まで持っておく。
+/// A file being tracked. Its content is kept until the final check.
 struct Tracked {
     entry: FileEntry,
     bytes: Vec<u8>,
@@ -53,7 +53,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                         let g = content::generate(*kind, target, &mut rng.fork())?;
                         let path = format!("{dir}/IMG_{:04}.{}", id + 1, content::extension(*kind));
                         let mut f = File::create(root.join(&path))
-                            .with_context(|| format!("{path} を作れない"))?;
+                            .with_context(|| format!("cannot create {path}"))?;
                         f.write_all(&g.bytes)?;
                         f.sync_all()?;
                         files.push(Tracked {
@@ -63,7 +63,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                     }
                     Ok(())
                 })?;
-                // 書き込んだ直後の配置を記録する
+                // Record placement right after writing.
                 let snapshot = backend::read_disk(&image, sc.size.0)?;
                 let index = Index::new(&snapshot);
                 for f in files.iter_mut().skip(first_new) {
@@ -91,7 +91,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                     for &i in &live {
                         if let Some(f) = files.get_mut(i) {
                             fs::remove_file(root.join(&f.entry.path))
-                                .with_context(|| format!("{} を削除できない", f.entry.path))?;
+                                .with_context(|| format!("cannot delete {}", f.entry.path))?;
                             f.entry.deleted_at = Some(step_no);
                         }
                     }
@@ -107,7 +107,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
         }
     }
 
-    // 最終イメージで、どれだけ元の中身が残っているか
+    // How much original content survives in the final image.
     let final_image = backend::read_disk(&image, sc.size.0)?;
     fs::write(out_dir.join(IMAGE_NAME), &final_image)?;
     fs::remove_file(&image)?;
@@ -131,7 +131,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
     })
 }
 
-/// マウントして `f` を実行し、成否にかかわらず切り離す。
+/// Mounts, runs `f`, and unmounts whether or not `f` succeeded.
 fn with_mounted(
     backend: &dyn Backend,
     image: &Path,
@@ -170,8 +170,8 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// ファイルシステムの開始位置。区画表が無ければ 0、MBR なら最初の区画の位置。
-/// 参考：MBR の区画表（オフセット 446 から 16 バイト×4、開始 LBA はエントリの +8）。
+/// Where the file system starts: 0 without a partition table, or the first MBR partition.
+/// Reference: MBR partition table (4 x 16-byte entries at offset 446; start LBA at entry +8).
 fn partition_offset(image: &[u8]) -> u64 {
     let is_vbr = |at: usize| image.get(at + 3..at + 11) == Some(b"EXFAT   ".as_slice());
     if is_vbr(0) {
@@ -188,8 +188,9 @@ fn partition_offset(image: &[u8]) -> u64 {
     }
 }
 
-/// exFAT のブートセクタからクラスタサイズを読む。
-/// 参考：Microsoft "exFAT file system specification" 3.1.14 BytesPerSectorShift / 3.1.15 SectorsPerClusterShift。
+/// Reads the cluster size from the exFAT boot sector.
+/// Reference: Microsoft "exFAT file system specification" 3.1.14 BytesPerSectorShift,
+/// 3.1.15 SectorsPerClusterShift.
 fn exfat_cluster_size(image: &[u8]) -> Option<u64> {
     let vbr = image.get(usize::try_from(partition_offset(image)).ok()?..)?;
     if vbr.get(3..11)? != b"EXFAT   " {

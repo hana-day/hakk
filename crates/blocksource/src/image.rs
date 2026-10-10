@@ -2,10 +2,10 @@ use std::{fs::File, io, path::Path};
 
 use crate::{BlockSource, ReadError, assert_sector_size, pread::read_full, readable_len};
 
-/// ディスクイメージ（通常のファイル）。読み取り専用で開く。
+/// A disk image (regular file), opened read-only.
 ///
-/// 物理ディスク（`/dev/rdiskN`、`\\.\PhysicalDriveN`）は大きさの取得方法や
-/// 境界の制約が異なるため、別の実装で扱う。
+/// Physical disks (`/dev/rdiskN`, `\\.\PhysicalDriveN`) differ in how their size is
+/// obtained and in alignment constraints, so they are handled by [`crate::Device`].
 #[derive(Debug)]
 pub struct ImageFile {
     file: File,
@@ -14,7 +14,7 @@ pub struct ImageFile {
 }
 
 impl ImageFile {
-    /// 読み取り専用で開く。大きさは開いた時点のものに固定する。セクタサイズは 512。
+    /// Opens the file read-only. The size is fixed at open time. The sector size is 512.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
@@ -26,7 +26,7 @@ impl ImageFile {
     }
 
     /// # Panics
-    /// `sector_size` が2のべき乗でない場合。
+    /// If `sector_size` is not a power of two.
     pub fn with_sector_size(mut self, sector_size: u32) -> Self {
         assert_sector_size(sector_size);
         self.sector_size = sector_size;

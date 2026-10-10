@@ -1,9 +1,9 @@
-# cargo-deny 設定。GPL/AGPL系の依存を入れないための検査
+# cargo-deny configuration. Keeps GPL-family licenses out of the dependency tree.
 [graph]
 all-features = true
 
 [licenses]
-# 許可リスト方式。ここにないライセンスは失敗する（GPL/LGPL/AGPL/MPLなどは意図的に含めない）
+# Allowlist: any license not listed fails (GPL/LGPL/AGPL/MPL are deliberately absent).
 allow = [
     "MIT",
     "Apache-2.0",
@@ -18,13 +18,13 @@ allow = [
 confidence-threshold = 0.9
 
 [licenses.private]
-# 自前のクレート（publish = false）はライセンス未記載でも検査対象外
+# Our own crates (publish = false) have no license field and are not checked.
 ignore = true
 
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
-# ワークスペース内のパス指定の依存（publish = false）はワイルドカードとみなさない
+# Path dependencies within the workspace (publish = false) are not treated as wildcards.
 allow-wildcard-paths = true
 
 [advisories]

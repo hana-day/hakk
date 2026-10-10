@@ -1,4 +1,4 @@
-//! 正解マニフェスト。評価ツールはこれと復元結果を照合する。
+//! The ground-truth manifest. The evaluator scores recovered files against it.
 
 use serde::Serialize;
 
@@ -16,14 +16,14 @@ pub struct Manifest {
     pub scenario: String,
     pub seed: u64,
     pub fs: FsKind,
-    /// マニフェストからの相対パス。
+    /// Path relative to the manifest.
     pub image: String,
     pub image_size: u64,
-    /// ファイルシステムの開始位置（区画表があれば最初の区画の位置）。
+    /// Where the file system starts (the first partition if there is a partition table).
     pub partition_offset: u64,
-    /// ファイルシステムのクラスタサイズ（ブートセクタから読んだもの）。
+    /// Cluster size of the file system (read from its boot sector).
     pub cluster_size: Option<u64>,
-    /// イメージを作った環境（OS ドライバによって配置が変わるため記録する）。
+    /// Where the image was built (recorded because layout depends on the OS driver).
     pub generator: Generator,
     pub files: Vec<FileEntry>,
 }
@@ -38,19 +38,19 @@ pub struct Generator {
 #[derive(Debug, Serialize)]
 pub struct FileEntry {
     pub id: u32,
-    /// ボリューム内のパス（`/` 区切り）。
+    /// Path within the volume (`/`-separated).
     pub path: String,
     pub kind: ContentKind,
     pub size: u64,
     pub sha256: String,
-    /// 書き込んだステップ番号。
+    /// Index of the step that wrote the file.
     pub written_at: usize,
-    /// 削除されたステップ番号（フォーマットも含む）。残っていれば `None`。
+    /// Index of the step that deleted the file (including formats); `None` if still live.
     pub deleted_at: Option<usize>,
-    /// 書き込んだ直後の配置。特定できなかった場合は `None`。
+    /// Placement right after writing; `None` if it could not be determined.
     pub extents: Option<Vec<Extent>>,
     pub fragmented: bool,
-    /// 最終イメージ上で元の中身のまま残っているバイト数。
+    /// Bytes still holding the original content in the final image.
     pub intact_bytes: u64,
     #[serde(flatten)]
     pub meta: Meta,

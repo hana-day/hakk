@@ -1,7 +1,8 @@
-//! 物理条件のシミュレーション。
+//! Simulation of physical conditions.
 //!
-//! 実機がなくても、不良セクタ・遅延・HDDのシークコスト・生デバイスの境界制約を
-//! 再現してテストするためのラッパー。すべてシードから決定的に動く。
+//! Wrappers that reproduce bad sectors, latency, HDD seek cost and raw-device alignment
+//! constraints so they can be tested without real hardware. Everything is deterministic
+//! given a seed.
 
 use std::{
     io,
@@ -15,10 +16,10 @@ use std::{
 
 use crate::{BlockSource, ReadError, ReadErrorKind, readable_len};
 
-/// 生デバイスと同じく、位置か長さがセクタ境界に揃っていない読み込みを拒否する。
+/// Rejects reads whose offset or length is not sector-aligned, like a raw device.
 ///
-/// [`Aligned`](crate::Aligned) のテストや、上位の層が生デバイスの制約を
-/// 守っているかの確認に使う。
+/// Used to test [`Aligned`](crate::Aligned) and to check that upper layers respect
+/// raw-device constraints.
 #[derive(Debug)]
 pub struct StrictAlign<S> {
     inner: S,
@@ -50,43 +51,43 @@ impl<S: BlockSource> BlockSource for StrictAlign<S> {
     }
 }
 
-/// 障害の種類。
+/// The kind of fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultKind {
-    /// 毎回失敗する。
+    /// Fails every time.
     Bad,
-    /// 最初の `failures` 回だけ失敗し、その後は読める（リトライで救える）。
+    /// Fails the first `failures` times, then reads fine (recoverable by retrying).
     Weak { failures: u32 },
-    /// 応答せず、[`Latency::timeout`] だけ時間を消費して失敗する。
+    /// Does not respond; fails after spending [`Latency::timeout`].
     Timeout,
 }
 
-/// 障害を起こす範囲（セクタ番号）。
+/// A faulty range (in sectors).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fault {
     pub sectors: Range<u64>,
     pub kind: FaultKind,
 }
 
-/// 読み込みにかかる時間のモデル。
+/// A model of how long reads take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Latency {
-    /// 1回の読み込みごとの固定コスト。
+    /// Fixed cost per read.
     pub per_read: Duration,
-    /// 転送速度（バイト/秒）。0なら転送時間なし。
+    /// Transfer rate in bytes per second. 0 means transfers take no time.
     pub bytes_per_sec: u64,
-    /// シーク1回のコスト。
+    /// Cost of one seek.
     pub seek: Duration,
-    /// 直前の読み込みの終端からこれより離れた位置を読むとシークとみなす（バイト）。
+    /// A read further than this many bytes from the end of the previous read counts as a seek.
     pub seek_threshold: u64,
-    /// 失敗した読み込み（[`FaultKind::Bad`]・[`FaultKind::Weak`]）の追加コスト。
+    /// Extra cost of a failed read ([`FaultKind::Bad`], [`FaultKind::Weak`]).
     pub error: Duration,
-    /// [`FaultKind::Timeout`] のコスト。
+    /// Cost of a [`FaultKind::Timeout`].
     pub timeout: Duration,
 }
 
 impl Latency {
-    /// 時間がかからない。
+    /// Nothing takes any time.
     pub const NONE: Self = Self {
         per_read: Duration::ZERO,
         bytes_per_sec: 0,
@@ -96,7 +97,7 @@ impl Latency {
         timeout: Duration::ZERO,
     };
 
-    /// 7200rpm級のHDDのおおよその値。
+    /// Rough figures for a 7200 rpm HDD.
     pub const HDD: Self = Self {
         per_read: Duration::from_micros(50),
         bytes_per_sec: 150_000_000,
@@ -115,7 +116,7 @@ impl Latency {
     }
 }
 
-/// シミュレーション上の経過時間。複製しても同じ時計を指す。
+/// Simulated elapsed time. Clones share the same clock.
 #[derive(Debug, Clone, Default)]
 pub struct VirtualClock {
     nanos: Arc<AtomicU64>,
@@ -132,21 +133,21 @@ impl VirtualClock {
     }
 }
 
-/// 障害注入ラッパー。
+/// Fault injection wrapper.
 ///
-/// 不良セクタなどの障害と、読み込みにかかる時間を模擬する。時間は既定では
-/// [`VirtualClock`] に積算するだけで実際には待たない（[`Faulty::real_sleep`] で待つ）。
+/// Simulates faults such as bad sectors, and the time reads take. By default time is only
+/// accumulated on a [`VirtualClock`] without actually waiting (see [`Faulty::real_sleep`]).
 #[derive(Debug)]
 pub struct Faulty<S> {
     inner: S,
-    /// 開始セクタ順に並び、互いに重ならない。
+    /// Sorted by start sector; never overlapping.
     faults: Vec<Fault>,
-    /// `faults` と同じ並び。[`FaultKind::Weak`] がこれまでに失敗した回数。
+    /// Parallel to `faults`: how many times each [`FaultKind::Weak`] has failed so far.
     weak_failures: Mutex<Vec<u32>>,
     latency: Latency,
     real_sleep: bool,
     clock: VirtualClock,
-    /// 直前の読み込みの終端（シーク判定用）。
+    /// End of the previous read (for seek detection).
     head: AtomicU64,
 }
 
@@ -163,12 +164,12 @@ impl<S: BlockSource> Faulty<S> {
         }
     }
 
-    /// 障害を追加する。
+    /// Adds a fault.
     ///
     /// # Panics
-    /// 範囲が空の場合、または既存の障害と重なる場合。
+    /// If the range is empty or overlaps an existing fault.
     pub fn fault(mut self, sectors: Range<u64>, kind: FaultKind) -> Self {
-        assert!(!sectors.is_empty(), "障害の範囲が空: {sectors:?}");
+        assert!(!sectors.is_empty(), "empty fault range: {sectors:?}");
         let i = self
             .faults
             .partition_point(|f| f.sectors.start < sectors.start);
@@ -182,7 +183,7 @@ impl<S: BlockSource> Faulty<S> {
             .is_some_and(|n| n.sectors.start < sectors.end);
         assert!(
             !overlaps_prev && !overlaps_next,
-            "障害の範囲が重なっている: {sectors:?}"
+            "overlapping fault ranges: {sectors:?}"
         );
         self.faults.insert(i, Fault { sectors, kind });
         self.weak_failures
@@ -196,8 +197,8 @@ impl<S: BlockSource> Faulty<S> {
         self.fault(sectors, FaultKind::Bad)
     }
 
-    /// シードから決定的に、不良セクタの連なりを `runs` 個まき散らす。
-    /// 各連なりの長さは 1〜`max_run` セクタ。既存の障害と重なるものは捨てる。
+    /// Deterministically scatters `runs` runs of bad sectors from `seed`.
+    /// Each run is 1 to `max_run` sectors long. Runs overlapping existing faults are dropped.
     pub fn random_bad(mut self, seed: u64, runs: usize, max_run: u64) -> Self {
         let sectors = self.inner.len() / u64::from(self.inner.sector_size());
         if sectors == 0 || max_run == 0 {
@@ -224,13 +225,13 @@ impl<S: BlockSource> Faulty<S> {
         self
     }
 
-    /// 模擬した時間だけ実際にスレッドを止める。
+    /// Actually sleep the thread for the simulated time.
     pub fn real_sleep(mut self, yes: bool) -> Self {
         self.real_sleep = yes;
         self
     }
 
-    /// 注入した障害の一覧（正解データとして評価に使う）。
+    /// The injected faults (ground truth for evaluation).
     pub fn faults(&self) -> &[Fault] {
         &self.faults
     }
@@ -246,8 +247,8 @@ impl<S: BlockSource> Faulty<S> {
         }
     }
 
-    /// セクタ範囲 `s0..s1` に最初に引っかかる障害を返す。
-    /// [`FaultKind::Weak`] はここで失敗回数を数え、回数を使い切っていれば素通りさせる。
+    /// Returns the first fault hit by sectors `s0..s1`.
+    /// [`FaultKind::Weak`] failures are counted here; exhausted ones are let through.
     fn hit(&self, s0: u64, s1: u64) -> Option<&Fault> {
         let first = self.faults.partition_point(|f| f.sectors.end <= s0);
         let mut weak = self.weak_failures.lock().unwrap_or_else(|e| e.into_inner());
@@ -306,7 +307,7 @@ impl<S: BlockSource> BlockSource for Faulty<S> {
             }
             FaultKind::Bad | FaultKind::Weak { .. } => {
                 cost += self.latency.error;
-                ReadErrorKind::Io(io::Error::other("模擬した不良セクタ"))
+                ReadErrorKind::Io(io::Error::other("simulated bad sector"))
             }
         };
         self.spend(cost);
@@ -314,7 +315,9 @@ impl<S: BlockSource> BlockSource for Faulty<S> {
     }
 }
 
-/// 依存を増やさないための小さな擬似乱数（SplitMix64）。
+/// A tiny PRNG (SplitMix64) to avoid extra dependencies.
+///
+/// Reference: Steele, Lea, Flood, "Fast Splittable Pseudorandom Number Generators", OOPSLA 2014.
 struct SplitMix64(u64);
 
 impl SplitMix64 {

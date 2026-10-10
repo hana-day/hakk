@@ -1,12 +1,13 @@
-//! 最小限の EXIF（APP1）を作る。
+//! Builds a minimal EXIF (APP1) segment.
 //!
-//! 参考：CIPA DC-008（Exif 2.3）、TIFF Revision 6.0。
+//! Reference: CIPA DC-008 (Exif 2.3), TIFF Revision 6.0.
 
 use serde::Serialize;
 
 use crate::rng::Rng;
 
-/// 撮影情報。復元時のファイル名生成（例 `2025-08-14_153022_ILCE-7M4.jpg`）の正解になる。
+/// Capture info: the expected answer for naming recovered files
+/// (e.g. `2025-08-14_153022_ILCE-7M4.jpg`).
 #[derive(Debug, Clone, Serialize)]
 pub struct Exif {
     pub make: String,
@@ -45,9 +46,9 @@ impl Exif {
         }
     }
 
-    /// APP1 セグメント全体（マーカー `FF E1` から）。
+    /// The whole APP1 segment (starting at the `FF E1` marker).
     pub fn app1(&self) -> Vec<u8> {
-        // TIFF ヘッダ（リトルエンディアン）。オフセットはすべて TIFF ヘッダの先頭から数える
+        // TIFF header (little endian). All offsets count from the start of the TIFF header.
         let make = ascii(&self.make);
         let model = ascii(&self.model);
         let date = ascii(&self.date_time_original);
@@ -65,7 +66,7 @@ impl Exif {
         t.extend_from_slice(b"II\x2A\x00");
         t.extend_from_slice(&IFD0.to_le_bytes());
 
-        // IFD0：タグ番号の昇順
+        // IFD0, tags in ascending order.
         t.extend_from_slice(&IFD0_ENTRIES.to_le_bytes());
         entry(&mut t, 0x010F, ASCII, len32(&make), make_at); // Make
         entry(&mut t, 0x0110, ASCII, len32(&model), model_at); // Model
@@ -103,12 +104,13 @@ fn len32(v: &[u8]) -> u32 {
     u32::try_from(v.len()).unwrap_or(u32::MAX)
 }
 
-/// エントリ数 `n` の IFD の大きさ（件数2 + 12n + 次IFD4）。
+/// Size of an IFD with `n` entries (2 for the count + 12n + 4 for the next IFD).
 const fn ifd_len(n: u16) -> u32 {
     2 + 12 * n as u32 + 4
 }
 
-/// 値はすべて4バイトを超えるか LONG 1個なので、値欄にはオフセット（または値）を入れる。
+/// Every value here is longer than 4 bytes or a single LONG, so the value field holds an
+/// offset (or the value itself).
 fn entry(t: &mut Vec<u8>, tag: u16, ty: u16, count: u32, value: u32) {
     t.extend_from_slice(&tag.to_le_bytes());
     t.extend_from_slice(&ty.to_le_bytes());

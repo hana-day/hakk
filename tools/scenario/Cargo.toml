@@ -1,6 +1,6 @@
 [package]
 name = "hakk-scenario"
-description = "シナリオ生成器：シードから削除ファイル入りのディスクイメージと正解マニフェストを作る"
+description = "Scenario generator: builds disk images with deleted files and a ground-truth manifest from a seed"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

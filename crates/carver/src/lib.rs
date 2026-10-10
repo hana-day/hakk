@@ -1,10 +1,11 @@
-//! カービング：ファイルシステムを使わず、生データからファイルを探して切り出す。
+//! Carving: finding and extracting files from raw data without the file system.
 //!
-//! 今は比較の基準にする最小限の実装（[`naive`]）だけがある。フェーズ1で本実装に置き換える。
+//! For now this only has a minimal baseline implementation ([`naive`]), to be replaced by
+//! the real one in phase 1.
 
 pub mod naive;
 
-/// 見つかったファイルの候補。
+/// A candidate file found on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Found {
     pub offset: u64,

@@ -1,6 +1,6 @@
-# 基本：写真と動画を書き込み、半分を削除し、少し書き足す
-# macOS の exFAT は空いた領域を前から再利用するので、削除したファイルの一部が上書きされ、
-# 書き足したファイルは隙間を埋めるように断片化する
+# Basic: write photos and videos, delete half, then write a few more.
+# macOS's exFAT driver reuses free space from the front, so some deleted files get
+# overwritten and the new files fragment to fill the gaps.
 name = "basic"
 seed = 1
 size = "64MiB"

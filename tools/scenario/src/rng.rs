@@ -1,6 +1,9 @@
-/// シードから決定的に動く擬似乱数（SplitMix64）。
+/// A deterministic PRNG seeded per scenario (SplitMix64).
 ///
-/// 外部クレートの版上げで乱数列が変わり、シナリオの再現性が崩れるのを避けるため自前で持つ。
+/// Kept in-house so that dependency upgrades never change the sequence and break
+/// scenario reproducibility.
+///
+/// Reference: Steele, Lea, Flood, "Fast Splittable Pseudorandom Number Generators", OOPSLA 2014.
 #[derive(Debug, Clone)]
 pub struct Rng(u64);
 
@@ -17,7 +20,7 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    /// `lo..=hi` から一様に選ぶ（`lo > hi` なら `lo`）。
+    /// Uniform pick from `lo..=hi` (`lo` if `lo > hi`).
     pub fn range(&mut self, lo: u64, hi: u64) -> u64 {
         if lo >= hi {
             return lo;
@@ -29,7 +32,7 @@ impl Rng {
         }
     }
 
-    /// `0..n` の添字を1つ選ぶ（`n == 0` なら 0）。
+    /// Picks an index in `0..n` (0 if `n == 0`).
     pub fn index(&mut self, n: usize) -> usize {
         let hi = (n as u64).saturating_sub(1);
         usize::try_from(self.range(0, hi)).unwrap_or(0)
@@ -50,7 +53,7 @@ impl Rng {
         v
     }
 
-    /// Fisher–Yates でシャッフルする。
+    /// Fisher-Yates shuffle.
     pub fn shuffle<T>(&mut self, v: &mut [T]) {
         for i in (1..v.len()).rev() {
             let j = self.index(i + 1);
@@ -58,7 +61,7 @@ impl Rng {
         }
     }
 
-    /// 子の乱数列を派生させる（ファイルごとの内容生成などに使い、親の列を乱さない）。
+    /// Derives a child generator (e.g. per file) without disturbing the parent sequence much.
     pub fn fork(&mut self) -> Self {
         Self(self.next_u64())
     }

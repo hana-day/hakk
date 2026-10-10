@@ -1,9 +1,10 @@
-//! シナリオ生成器：シードから削除ファイル入りのディスクイメージと正解マニフェストを作る。
+//! Scenario generator: builds a disk image with deleted files and a ground-truth manifest
+//! from a seed.
 //!
-//! 使い方：`hakk-scenario <シナリオ.toml> <出力先ディレクトリ>`
-//! 出力先に `image.img`（イメージ）と `manifest.json`（正解マニフェスト）を作る。
+//! Usage: `hakk-scenario <scenario.toml> <output dir>`
+//! Writes `image.img` (the disk image) and `manifest.json` (the ground truth) to the output dir.
 
-// 開発用ツールで、扱う値（イメージの大きさなど）は小さいので桁落ちの lint は外す
+// A development tool handling small values (image sizes etc.); truncation lints are noise here.
 #![allow(clippy::cast_possible_truncation)]
 
 mod backend;
@@ -22,7 +23,7 @@ use anyhow::{Result, bail};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [scenario, out] = args.as_slice() else {
-        bail!("使い方: hakk-scenario <シナリオ.toml> <出力先ディレクトリ>");
+        bail!("usage: hakk-scenario <scenario.toml> <output dir>");
     };
     let sc = scenario::Scenario::load(scenario.as_ref())?;
     let out = PathBuf::from(out);
@@ -40,7 +41,7 @@ fn main() -> Result<()> {
     let unlocated = files.iter().filter(|f| f.extents.is_none()).count();
     let fragmented = files.iter().filter(|f| f.fragmented).count();
     println!(
-        "{}: ファイル {} 件（削除 {} 件、うち中身が完全に残っている {} 件）、断片化 {} 件、配置不明 {} 件、{:.1} 秒",
+        "{}: {} files ({} deleted, {} of them fully intact), {} fragmented, {} unlocated, {:.1}s",
         manifest.scenario,
         files.len(),
         deleted.len(),
@@ -49,6 +50,6 @@ fn main() -> Result<()> {
         unlocated,
         started.elapsed().as_secs_f64(),
     );
-    println!("→ {}", out.display());
+    println!("-> {}", out.display());
     Ok(())
 }

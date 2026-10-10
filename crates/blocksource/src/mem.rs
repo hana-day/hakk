@@ -1,6 +1,6 @@
 use crate::{BlockSource, ReadError, assert_sector_size};
 
-/// メモリ上のバッファ。主にテスト用。
+/// An in-memory buffer. Mainly for tests.
 #[derive(Debug, Clone)]
 pub struct MemSource {
     data: Vec<u8>,
@@ -8,7 +8,7 @@ pub struct MemSource {
 }
 
 impl MemSource {
-    /// セクタサイズ 512 で作る。
+    /// Creates a source with a sector size of 512.
     pub fn new(data: impl Into<Vec<u8>>) -> Self {
         Self {
             data: data.into(),
@@ -17,7 +17,7 @@ impl MemSource {
     }
 
     /// # Panics
-    /// `sector_size` が2のべき乗でない場合。
+    /// If `sector_size` is not a power of two.
     pub fn with_sector_size(mut self, sector_size: u32) -> Self {
         assert_sector_size(sector_size);
         self.sector_size = sector_size;

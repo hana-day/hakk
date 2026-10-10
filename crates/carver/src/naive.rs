@@ -1,10 +1,10 @@
-//! 最も素朴なカービング（比較の基準用）。
+//! The most naive carving possible (a baseline for comparison).
 //!
-//! セクタ境界にある JPEG の開始（`FF D8 FF`）を探し、そこから最初の終了（`FF D9`）までを
-//! 切り出す。断片化には対応せず、終了の誤検出（埋め込みのサムネイルや、
-//! コメント内の偶然の `FF D9`）も考慮しない。
+//! Finds JPEG starts (`FF D8 FF`) on sector boundaries and cuts up to the first end marker
+//! (`FF D9`). It does not handle fragmentation, nor false end markers (embedded thumbnails,
+//! or a stray `FF D9` inside a comment).
 //!
-//! 参考：ITU-T T.81 Annex B（JPEG のマーカー）。
+//! Reference: ITU-T T.81 Annex B (JPEG markers).
 
 use blocksource::BlockSource;
 
@@ -14,13 +14,13 @@ const SOI: [u8; 3] = [0xFF, 0xD8, 0xFF];
 const EOI: [u8; 2] = [0xFF, 0xD9];
 const CHUNK: usize = 4 << 20;
 
-/// `src` 全体から JPEG を探す。読めなかった範囲は飛ばす。
+/// Searches all of `src` for JPEGs, skipping ranges that cannot be read.
 pub fn scan(src: &impl BlockSource, max_len: u64) -> Vec<Found> {
     let ss = u64::from(src.sector_size());
     let mut found = Vec::new();
     let mut buf = vec![0u8; CHUNK];
     let mut pos = 0u64;
-    // 直前に見つけたファイルの終わり（その中は探さない）
+    // End of the last file found (we do not search inside it).
     let mut skip_until = 0u64;
     while pos < src.len() {
         let Ok(n) = src.read_at(pos, &mut buf) else {
@@ -52,7 +52,7 @@ pub fn scan(src: &impl BlockSource, max_len: u64) -> Vec<Found> {
     found
 }
 
-/// `start` から最初の `FF D9` の直後までの長さ。`max_len` 以内に無ければ `None`。
+/// Length from `start` through the first `FF D9`, or `None` if not found within `max_len`.
 fn find_eoi(src: &impl BlockSource, start: u64, max_len: u64) -> Option<u64> {
     let mut buf = vec![0u8; 1 << 20];
     let mut done = 0u64;
@@ -64,7 +64,7 @@ fn find_eoi(src: &impl BlockSource, start: u64, max_len: u64) -> Option<u64> {
         }
         for (i, &b) in buf.get(..n)?.iter().enumerate() {
             let at = done + i as u64;
-            // 先頭の FF D8 自体は飛ばす
+            // Skip the leading FF D8 itself.
             if prev_ff && b == EOI[1] && at >= 2 {
                 return Some(at + 1);
             }
@@ -94,7 +94,7 @@ mod tests {
         let b = jpeg(5000);
         disk[1024..1024 + a.len()].copy_from_slice(&a);
         disk[8192..8192 + b.len()].copy_from_slice(&b);
-        // セクタ境界にない開始は無視する
+        // Starts that are not on a sector boundary are ignored.
         disk[20_001..20_004].copy_from_slice(&SOI);
 
         let found = scan(&MemSource::new(disk), 1 << 20);

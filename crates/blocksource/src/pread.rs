@@ -2,7 +2,7 @@ use std::{fs::File, io};
 
 use crate::{ReadError, ReadErrorKind};
 
-/// `offset` から `buf` を満たすまで位置指定で読む。途中で終端に達したら読めた分だけ返す。
+/// Positional read until `buf` is full. Returns the bytes read so far if the end is reached.
 pub(crate) fn read_full(file: &File, offset: u64, buf: &mut [u8]) -> Result<usize, ReadError> {
     let mut done = 0;
     while let Some(rest) = buf.get_mut(done..).filter(|r| !r.is_empty()) {
@@ -27,6 +27,6 @@ fn pread(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
 
 #[cfg(windows)]
 fn pread(file: &File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-    // ファイルポインタは動くが、毎回位置を指定して読むので影響しない
+    // This moves the file pointer, which is harmless since every read passes an offset.
     std::os::windows::fs::FileExt::seek_read(file, buf, offset)
 }

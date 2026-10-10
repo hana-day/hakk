@@ -1,6 +1,6 @@
 [package]
 name = "hakk-eval"
-description = "評価ツール：正解マニフェストと復元結果を照合して復元率を出す"
+description = "Evaluator: scores recovered files against a ground-truth manifest"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

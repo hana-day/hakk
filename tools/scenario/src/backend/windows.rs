@@ -1,9 +1,9 @@
-//! Windows：固定サイズの VHD を `diskpart` で作り、`Mount-DiskImage` で接続する。
+//! Windows: creates a fixed-size VHD with `diskpart` and attaches it with `Mount-DiskImage`.
 //!
-//! Windows は区画表の無いディスクにボリュームを作れないので、MBR の区画を1つ作る。
-//! 固定サイズの VHD は「ディスクの中身 ＋ 末尾 512 バイトのフッタ」なので、
-//! 先頭からディスクの大きさ分がそのままディスクイメージになる。
-//! 管理者権限が必要（GitHub Actions の Windows ランナーは管理者で動く）。
+//! Windows cannot create volumes on a disk without a partition table, so one MBR
+//! partition is created. A fixed VHD is "disk contents + a 512-byte footer", so its first
+//! `size` bytes are the disk image as is.
+//! Requires admin rights (GitHub Actions Windows runners run as admin).
 
 use std::{
     fs,
@@ -21,7 +21,7 @@ pub struct Vhd;
 impl Backend for Vhd {
     fn create(&self, dir: &Path, size: u64, fs: FsKind, label: &str) -> Result<PathBuf> {
         if !size.is_multiple_of(1 << 20) {
-            bail!("Windows では大きさを MiB 単位にする");
+            bail!("on Windows the size must be a whole number of MiB");
         }
         let image = fs::canonicalize(dir)?.join("work.vhd");
         if image.exists() {
@@ -56,7 +56,7 @@ impl Backend for Vhd {
     fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()> {
         let FsKind::Exfat = fs;
         let m = self.mount(image)?;
-        // 既定でクイックフォーマット（-Full を付けない限りデータ領域は消さない）
+        // Quick format by default (data areas are kept unless -Full is given).
         let result = powershell(&format!(
             "Format-Volume -DriveLetter {letter} -FileSystem exFAT -NewFileSystemLabel {label} -Force -Confirm:$false | Out-Null",
             letter = m.root().to_string_lossy().chars().next().unwrap_or('Z'),
@@ -67,7 +67,7 @@ impl Backend for Vhd {
     }
 
     fn mount(&self, image: &Path) -> Result<Box<dyn Mounted>> {
-        // ドライブ文字は自動では付かないことがあるので、無ければ付ける
+        // A drive letter is not always assigned automatically; assign one if missing.
         let out = powershell(&format!(
             "$d = Mount-DiskImage -ImagePath {img} -PassThru | Get-Disk
              $p = Get-Partition -DiskNumber $d.Number | Where-Object Type -ne 'Reserved' | Select-Object -First 1
@@ -83,7 +83,7 @@ impl Backend for Vhd {
             .chars()
             .next()
             .filter(char::is_ascii_alphabetic)
-            .with_context(|| format!("ドライブ文字が分からない: {out:?}"))?;
+            .with_context(|| format!("no drive letter found: {out:?}"))?;
         Ok(Box::new(Volume {
             image: image.to_path_buf(),
             root: PathBuf::from(format!("{letter}:\\")),
@@ -121,7 +121,7 @@ fn powershell(script: &str) -> Result<String> {
     ]))
 }
 
-/// PowerShell の単一引用符の文字列にする。
+/// Quotes as a PowerShell single-quoted string.
 fn quote(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', "''"))
 }

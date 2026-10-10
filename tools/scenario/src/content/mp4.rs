@@ -1,10 +1,10 @@
-//! 動画（MP4）の生成。
+//! Video (MP4) generation.
 //!
-//! カメラが書き出す形に合わせて `ftyp` → `mdat` → `moov`（末尾）の順に並べる。
-//! サンプルは長さ付き NAL 単位の形だが中身は乱数なので、構造は正しいが再生はできない。
-//! カービングの構造解析（box を辿る）と配置の特定のためのもの。
+//! Boxes are laid out `ftyp` -> `mdat` -> `moov` (at the end), like cameras write them.
+//! Samples are length-prefixed NAL units filled with random bytes, so the structure is valid
+//! but the video does not play. Meant for structural carving (walking boxes) and locating.
 //!
-//! 参考：ISO/IEC 14496-12（ISO BMFF）、ISO/IEC 14496-15（AVC のファイル形式）。
+//! Reference: ISO/IEC 14496-12 (ISO BMFF), ISO/IEC 14496-15 (AVC file format).
 
 use super::{Generated, Meta};
 use crate::rng::Rng;
@@ -15,7 +15,7 @@ const WIDTH: u16 = 1920;
 const HEIGHT: u16 = 1080;
 
 pub fn generate(target: u64, rng: &mut Rng) -> Generated {
-    // サンプルの大きさを決める。30枚ごとに大きいIフレーム、それ以外はPフレーム
+    // Pick sample sizes: a large I-frame every 30 samples, P-frames otherwise.
     let mut sizes = Vec::new();
     let mut total = 0u64;
     while total < target.saturating_sub(4096) || sizes.is_empty() {
@@ -41,7 +41,7 @@ pub fn generate(target: u64, rng: &mut Rng) -> Generated {
         offsets.push(mdat_start + mdat_payload.len() as u64);
         let nal_len = size - 4;
         mdat_payload.extend_from_slice(&nal_len.to_be_bytes());
-        // NAL ヘッダ：IDR（5）か非IDR（1）
+        // NAL header: IDR (5) or non-IDR (1).
         mdat_payload.push(if i % 30 == 0 { 0x65 } else { 0x41 });
         mdat_payload.extend_from_slice(&rng.bytes(nal_len as usize - 1));
     }
@@ -67,7 +67,7 @@ pub fn generate(target: u64, rng: &mut Rng) -> Generated {
 }
 
 fn moov(sizes: &[u32], offsets: &[u64], duration: u32, rng: &mut Rng) -> Vec<u8> {
-    // 作成日時（1904年起点の秒）。2018〜2025年あたり
+    // Creation time (seconds since 1904), roughly 2018 to 2025.
     let created = u32::try_from(rng.range(3_597_000_000, 3_850_000_000)).unwrap_or(0);
     let n = u32::try_from(sizes.len()).unwrap_or(u32::MAX);
 
@@ -148,7 +148,7 @@ fn moov(sizes: &[u32], offsets: &[u64], duration: u32, rng: &mut Rng) -> Vec<u8>
             &SAMPLE_DELTA.to_be_bytes(),
         ]),
     );
-    // 1チャンク1サンプル
+    // One sample per chunk.
     let stsc = full(
         b"stsc",
         0,
@@ -185,7 +185,7 @@ fn moov(sizes: &[u32], offsets: &[u64], duration: u32, rng: &mut Rng) -> Vec<u8>
     bx(b"moov", &cat(&[&mvhd, &trak]))
 }
 
-/// `avc1` サンプルエントリ（`avcC` 付き）。SPS/PPS は形だけ。
+/// An `avc1` sample entry with `avcC`. SPS/PPS are placeholders.
 fn avc1(rng: &mut Rng) -> Vec<u8> {
     let mut sps = vec![0x67, 0x64, 0x00, 0x28];
     sps.extend_from_slice(&rng.bytes(12));
@@ -254,7 +254,7 @@ fn full(ty: &[u8; 4], version: u8, flags: u32, payload: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// box を辿って、トップレベルの並びと大きさが整合していること
+    /// Walking the boxes, the top-level order and sizes are consistent.
     #[test]
     fn top_level_boxes_are_consistent() {
         let g = generate(500_000, &mut Rng::new(7));

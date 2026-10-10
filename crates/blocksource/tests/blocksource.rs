@@ -1,4 +1,4 @@
-// テストコードなので、ライブラリ向けの厳しい lint は外す
+// Test code: relax the strict lints meant for library code.
 #![allow(clippy::cast_possible_truncation, clippy::indexing_slicing)]
 
 use std::{io::Write, time::Duration};
@@ -9,14 +9,14 @@ use blocksource::{
 };
 use proptest::prelude::*;
 
-/// シードから決定的なバイト列を作る。
+/// Deterministic bytes from a seed.
 fn pattern(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
         .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed) ^ (i >> 8) as u8)
         .collect()
 }
 
-/// `src` を `offset` から `len` バイト読んだ結果。
+/// Reads `len` bytes of `src` at `offset`.
 fn read(src: &impl BlockSource, offset: u64, len: usize) -> Result<Vec<u8>, ReadErrorKind> {
     let mut buf = vec![0xAA; len];
     let n = src.read_at(offset, &mut buf).map_err(|e| e.into_kind())?;
@@ -24,7 +24,7 @@ fn read(src: &impl BlockSource, offset: u64, len: usize) -> Result<Vec<u8>, Read
     Ok(buf)
 }
 
-/// 正解：スライスとして切り出した結果。
+/// Expected result: the same range sliced directly.
 fn expected(data: &[u8], offset: u64, len: usize) -> Vec<u8> {
     let start = (offset as usize).min(data.len());
     let end = start.saturating_add(len).min(data.len());
@@ -53,7 +53,7 @@ proptest! {
         prop_assert_eq!(read(&src, offset, n).unwrap(), expected(&data, offset, n));
     }
 
-    /// 境界に揃っていない読み込みも、Aligned を通せば生デバイス相当の制約下で正しく読める
+    /// Misaligned reads through Aligned work even under raw-device constraints.
     #[test]
     fn aligned_over_strict_matches_slice(
         ss in sector_size(),
@@ -66,7 +66,7 @@ proptest! {
         prop_assert_eq!(read(&src, offset, n).unwrap(), expected(&data, offset, n));
     }
 
-    /// 障害がなければ素通し
+    /// With no faults, Faulty is transparent.
     #[test]
     fn faulty_without_faults_is_transparent(len in 0usize..20_000, offset in 0u64..25_000, n in 0usize..10_000) {
         let data = pattern(len, 4);
@@ -74,7 +74,8 @@ proptest! {
         prop_assert_eq!(read(&src, offset, n).unwrap(), expected(&data, offset, n));
     }
 
-    /// 不良セクタに触れる読み込みだけが失敗し、報告される範囲は要求と不良範囲の重なりに収まる
+    /// Only reads touching bad sectors fail, and the reported range lies within the
+    /// overlap of the request and the bad range.
     #[test]
     fn faulty_fails_exactly_on_bad_sectors(
         seed: u64,
@@ -135,7 +136,7 @@ fn weak_sectors_recover_after_retries() {
         read(&src, 1024, 512).unwrap(),
         expected(&pattern(4096, 0), 1024, 512)
     );
-    // 触れない範囲は最初から読める
+    // Ranges not touching the fault read fine from the start.
     assert!(read(&src, 0, 1024).is_ok());
 }
 
@@ -166,12 +167,12 @@ fn seek_cost_only_on_jumps() {
         ..Latency::NONE
     };
     let src = Faulty::new(MemSource::new(vec![0; 16 << 20])).latency(lat);
-    // 先頭から順に読む：シークなし
+    // Sequential reads from the start: no seeks.
     for i in 0..8u64 {
         read(&src, i << 20, 1 << 20).unwrap();
     }
     assert_eq!(src.clock().elapsed(), Duration::ZERO);
-    // 遠くへ飛んで戻る：2回シーク
+    // Jump far away and back: two seeks.
     read(&src, 15 << 20, 4096).unwrap();
     read(&src, 8 << 20, 4096).unwrap();
     assert_eq!(src.clock().elapsed(), Duration::from_millis(16));
@@ -197,7 +198,7 @@ fn random_bad_is_deterministic() {
 }
 
 #[test]
-#[should_panic(expected = "重なっている")]
+#[should_panic(expected = "overlapping")]
 fn overlapping_faults_are_rejected() {
     let _ = Faulty::new(MemSource::new(vec![0; 4096]))
         .bad(1..4)

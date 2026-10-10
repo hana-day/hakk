@@ -1,6 +1,6 @@
 [package]
 name = "blocksource"
-description = "読み込み層の抽象化（物理ディスク / イメージファイル / 障害注入）"
+description = "Read layer abstraction (physical disks, image files, fault injection)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

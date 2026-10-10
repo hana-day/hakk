@@ -1,8 +1,8 @@
-//! 本物の OS ドライバでファイルシステムを操作する。
+//! Drives file systems through the real OS drivers.
 //!
-//! - macOS：`hdiutil` ＋ `newfs_exfat`（管理者権限不要）
-//! - Linux：`mkfs.exfat` ＋ ループバックマウント（`sudo` が必要。CI 用）
-//! - Windows：固定サイズの VHD ＋ `Mount-DiskImage`（管理者権限が必要。MBR の区画を1つ作る）
+//! - macOS: `hdiutil` + `newfs_exfat` (no admin rights needed)
+//! - Linux: `mkfs.exfat` + loop mount (needs `sudo`; for CI)
+//! - Windows: fixed-size VHD + `Mount-DiskImage` (needs admin; creates one MBR partition)
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -21,32 +21,32 @@ use anyhow::{Context, Result, bail};
 
 use crate::scenario::FsKind;
 
-/// イメージファイルにファイルシステムを作り、マウントする手段。
+/// Creates file systems on image files and mounts them.
 pub trait Backend {
-    /// `dir` に大きさ `size` の空のディスクを作り、ファイルシステムを作る。
-    /// 以後の操作に使う作業用ファイルを返す。その先頭 `size` バイトがディスクの中身になる
-    /// （VHD のように末尾に管理情報が付く形式もあるため）。
+    /// Creates an empty disk of `size` bytes in `dir` and makes a file system on it.
+    /// Returns the working file used from then on; its first `size` bytes are the disk
+    /// contents (some formats, like VHD, append metadata at the end).
     fn create(&self, dir: &Path, size: u64, fs: FsKind, label: &str) -> Result<PathBuf> {
         let image = dir.join("work.img");
-        // 中身ゼロの疎なファイル（ディスクを使い切らない）
+        // A sparse, zero-filled file (does not eat disk space).
         File::create(&image)?.set_len(size)?;
         self.format(&image, fs, label)?;
         Ok(image)
     }
 
-    /// クイックフォーマットする（既存のデータ領域は消さない）。
+    /// Quick-formats the volume (leaving existing data areas intact).
     fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()>;
     fn mount(&self, image: &Path) -> Result<Box<dyn Mounted>>;
 }
 
-/// マウント中のボリューム。
+/// A mounted volume.
 pub trait Mounted {
     fn root(&self) -> &Path;
-    /// 書き込みをディスクに反映して切り離す。
+    /// Flushes writes to disk and detaches.
     fn unmount(self: Box<Self>) -> Result<()>;
 }
 
-/// この OS の実装。
+/// The implementation for this OS.
 pub fn native() -> Result<Box<dyn Backend>> {
     #[cfg(target_os = "macos")]
     return Ok(Box::new(macos::Hdiutil));
@@ -56,25 +56,25 @@ pub fn native() -> Result<Box<dyn Backend>> {
     return Ok(Box::new(windows::Vhd));
     #[allow(unreachable_code)]
     {
-        bail!("この OS には対応していない")
+        bail!("unsupported OS")
     }
 }
 
-/// 作業用ファイルからディスクの中身（先頭 `size` バイト）を読む。
+/// Reads the disk contents (the first `size` bytes) from the working file.
 pub fn read_disk(image: &Path, size: u64) -> Result<Vec<u8>> {
-    let mut data = fs::read(image).with_context(|| format!("{} を読めない", image.display()))?;
+    let mut data = fs::read(image).with_context(|| format!("cannot read {}", image.display()))?;
     data.truncate(usize::try_from(size)?);
     Ok(data)
 }
 
-/// コマンドを実行して標準出力を返す。失敗したら標準エラーを含めて報告する。
+/// Runs a command and returns its stdout. On failure, reports stderr too.
 pub(crate) fn run(cmd: &mut Command) -> Result<String> {
     let out = cmd
         .output()
-        .with_context(|| format!("{cmd:?} を起動できない"))?;
+        .with_context(|| format!("cannot start {cmd:?}"))?;
     if !out.status.success() {
         bail!(
-            "{cmd:?} が失敗した（{}）: {}",
+            "{cmd:?} failed ({}): {}",
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         );

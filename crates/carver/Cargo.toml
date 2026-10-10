@@ -1,6 +1,6 @@
 [package]
 name = "carver"
-description = "カービング：生データからファイル固有のバイト列を探して切り出す"
+description = "Carving: finding files in raw data by their byte signatures"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

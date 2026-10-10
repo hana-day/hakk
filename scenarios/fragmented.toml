@@ -1,4 +1,4 @@
-# 断片化：隙間だらけのディスクに書き足したファイル（断片化する）を削除する
+# Fragmented: write files onto a disk full of holes (so they fragment), then delete them.
 name = "fragmented"
 seed = 3
 size = "64MiB"
@@ -15,7 +15,7 @@ max_size = "600KiB"
 op = "delete"
 fraction = 0.5
 
-# 隙間より大きいファイルを書くと、複数の隙間に分かれて置かれる
+# Files larger than the holes get split across several of them.
 [[steps]]
 op = "write"
 kind = "jpeg"

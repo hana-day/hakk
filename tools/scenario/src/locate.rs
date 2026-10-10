@@ -1,8 +1,9 @@
-//! ファイルの中身をイメージと照合して、ディスク上の配置を特定する。
+//! Finds where a file sits on disk by matching its content against the image.
 //!
-//! OS やファイルシステム解析に頼らず、バイト列だけから正解の配置を求める。
-//! イメージを 512 バイト単位で索引化し、ファイルを 512 バイトごとに区切って探す。
-//! 同じ中身のブロックが複数ある場合は、前後のブロックとの連続性で決める。
+//! The ground-truth placement comes from bytes alone, without relying on the OS or on file
+//! system parsing. The image is indexed in 512-byte blocks and each 512-byte block of the
+//! file is looked up. Blocks with duplicate content are resolved by contiguity with their
+//! neighbors.
 
 use std::collections::HashMap;
 
@@ -10,7 +11,7 @@ use serde::Serialize;
 
 pub const BLOCK: usize = 512;
 
-/// ファイルの一部がイメージのどこにあるか。
+/// Where part of a file lies in the image.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Extent {
     pub file_offset: u64,
@@ -18,7 +19,7 @@ pub struct Extent {
     pub len: u64,
 }
 
-/// イメージの 512 バイト境界のブロックの索引。
+/// Index of the image's 512-byte-aligned blocks.
 pub struct Index<'a> {
     image: &'a [u8],
     map: HashMap<u64, Vec<u64>>,
@@ -28,7 +29,7 @@ impl<'a> Index<'a> {
     pub fn new(image: &'a [u8]) -> Self {
         let mut map: HashMap<u64, Vec<u64>> = HashMap::new();
         for (i, block) in image.chunks_exact(BLOCK).enumerate() {
-            // ゼロ埋めのブロックは大量にあり、生成するファイルには現れないので省く
+            // Zero blocks are plentiful and never appear in generated files, so skip them.
             if block.iter().all(|&b| b == 0) {
                 continue;
             }
@@ -52,10 +53,10 @@ impl<'a> Index<'a> {
         self.image.get(start..start.checked_add(len)?)
     }
 
-    /// ファイル `data` の配置を求める。一部でも特定できなければ `None`。
+    /// Locates file `data`. Returns `None` if any part cannot be located.
     pub fn locate(&self, data: &[u8]) -> Option<Vec<Extent>> {
         let full_blocks = data.len() / BLOCK;
-        // 各ブロックの候補位置
+        // Candidate offsets for each block.
         let cands: Vec<Vec<u64>> = data
             .chunks_exact(BLOCK)
             .map(|b| self.candidates(b))
@@ -71,7 +72,7 @@ impl<'a> Index<'a> {
             })
             .collect();
 
-        // 一意に決まらないブロックは、隣が決まっていれば連続性で決める。前後から繰り返す
+        // Resolve ambiguous blocks by contiguity with resolved neighbors, until nothing changes.
         loop {
             let mut changed = false;
             for i in 0..full_blocks {
@@ -102,10 +103,10 @@ impl<'a> Index<'a> {
             push(&mut extents, (i * BLOCK) as u64, (*p)?, BLOCK as u64);
         }
 
-        // 端数：直前のブロックの続きにあるとみなして確かめる（クラスタは 512 より大きい）
+        // The tail: assume it follows the previous block (clusters are larger than 512).
         let tail = data.get(full_blocks * BLOCK..).unwrap_or_default();
         if !tail.is_empty() {
-            // 512 バイト未満のファイルは扱わない（生成側で 4KiB 以上にしている）
+            // Files under 512 bytes are not handled (the generator makes them at least 4 KiB).
             let at = extents.last().map(|e| e.image_offset + e.len)?;
             if self.block_at(at, tail.len()) != Some(tail) {
                 return None;
@@ -121,7 +122,7 @@ impl<'a> Index<'a> {
     }
 }
 
-/// 連続していれば直前の範囲を伸ばし、そうでなければ新しい範囲を足す。
+/// Extends the last extent if contiguous, otherwise appends a new one.
 fn push(extents: &mut Vec<Extent>, file_offset: u64, image_offset: u64, len: u64) {
     if let Some(last) = extents.last_mut()
         && last.file_offset + last.len == file_offset
@@ -137,7 +138,7 @@ fn push(extents: &mut Vec<Extent>, file_offset: u64, image_offset: u64, len: u64
     });
 }
 
-/// 配置 `extents` のうち、最終イメージ上で元の中身のまま残っているバイト数（512 バイト単位で判定）。
+/// Bytes of `extents` that still hold the original content in `image` (judged per 512-byte block).
 pub fn intact_bytes(image: &[u8], data: &[u8], extents: &[Extent]) -> u64 {
     let mut intact = 0;
     for e in extents {
@@ -160,7 +161,7 @@ pub fn intact_bytes(image: &[u8], data: &[u8], extents: &[Extent]) -> u64 {
     intact
 }
 
-/// FNV-1a を 8 バイト単位にしたもの。索引用なので衝突は中身の比較で弾く。
+/// FNV-1a over 8-byte words. Only used for indexing; collisions are caught by comparing content.
 fn hash(block: &[u8]) -> u64 {
     let mut h = 0xCBF2_9CE4_8422_2325u64;
     for chunk in block.chunks(8) {
@@ -181,7 +182,7 @@ mod tests {
     fn image_with(files: &[(&[u8], &[u64])], len: usize) -> Vec<u8> {
         let mut img = vec![0u8; len];
         for (data, places) in files {
-            // places[i] は i 番目の 4KiB 断片の置き場所
+            // places[i] is where the i-th 4 KiB fragment goes.
             for (chunk, &at) in data.chunks(4096).zip(places.iter()) {
                 let at = at as usize;
                 img[at..at + chunk.len()].copy_from_slice(chunk);
@@ -221,7 +222,8 @@ mod tests {
         );
     }
 
-    /// 2つのファイルの先頭が同じ（例：同じ量子化表）でも、続きとの連続性で区別できる
+    /// Files sharing identical leading blocks (e.g. same quantization tables) are told apart
+    /// by contiguity with what follows.
     #[test]
     fn duplicate_blocks_resolved_by_neighbors() {
         let mut a = vec![0x55u8; 1024];
@@ -247,7 +249,7 @@ mod tests {
         let mut img = image_with(&[(&data, &[4096, 8192])], 32 * 1024);
         let ext = Index::new(&img).locate(&data).unwrap();
         assert_eq!(intact_bytes(&img, &data, &ext), 8192);
-        img[5000] ^= 0xFF; // 1ブロックだけ壊す
+        img[5000] ^= 0xFF; // corrupt a single block
         assert_eq!(intact_bytes(&img, &data, &ext), 8192 - 512);
     }
 }
