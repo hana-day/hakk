@@ -24,6 +24,8 @@ use serde_json::{Value, json};
 
 pub fn run(bin: &Path, image: &Path, manifest: &Path, dir: &Path) -> Result<Value> {
     let out = dir.join("fs");
+    // Images without a file system (`fs = "none"`) yield nothing; score that as zero.
+    fs::create_dir_all(&out)?;
     let started = Instant::now();
     let entries = recover(image, &out)?;
     let elapsed = started.elapsed().as_secs_f64();
