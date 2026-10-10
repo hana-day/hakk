@@ -1,0 +1,30 @@
+# Reformat: fill the card, quick-format it, then shoot again on top.
+name = "reformat"
+seed = 101
+size = "512MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 200
+min_size = "500KiB"
+max_size = "2MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+count = 5
+min_size = "10MiB"
+max_size = "30MiB"
+dir = "DCIM/101HAKK"
+
+[[steps]]
+op = "format"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 60
+min_size = "1MiB"
+max_size = "3MiB"

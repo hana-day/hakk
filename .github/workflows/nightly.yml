@@ -1,0 +1,44 @@
+name: Nightly
+
+on:
+  schedule:
+    # 03:00 JST
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: bench (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      # The runner kernel lacks the exFAT driver by default; load it from the extra modules.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y exfatprogs testdisk "linux-modules-extra-$(uname -r)"
+          sudo modprobe exfat
+      - if: runner.os == 'macOS'
+        run: brew install testdisk
+      # Every scenario, including the large ones.
+      - shell: bash
+        run: cargo xtask bench scenarios/*.toml scenarios/nightly/*.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bench-${{ matrix.os }}
+          path: |
+            work/bench/summary.json
+            work/bench/*/manifest.json
+            work/bench/*/*.json

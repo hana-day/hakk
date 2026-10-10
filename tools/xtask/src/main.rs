@@ -57,7 +57,7 @@ fn bench(args: &[String]) -> Result<()> {
         "hakk-eval",
     ]))?;
     let bin = root.join("target/release");
-    let photorec = which("photorec");
+    let photorec = which(&exe("photorec"));
     if photorec.is_none() {
         eprintln!("photorec not found, skipping it (brew install testdisk / apt install testdisk)");
     }
@@ -74,7 +74,9 @@ fn bench(args: &[String]) -> Result<()> {
             fs::remove_dir_all(&dir)?;
         }
         eprintln!("== {name}: generating image");
-        run(Command::new(bin.join("hakk-scenario")).arg(sc).arg(&dir))?;
+        run(Command::new(bin.join(exe("hakk-scenario")))
+            .arg(sc)
+            .arg(&dir))?;
         let image = dir.join("image.img");
         let manifest = dir.join("manifest.json");
 
@@ -145,7 +147,7 @@ fn evaluate(
     dir: &Path,
 ) -> Result<serde_json::Value> {
     let json = dir.join(format!("{tool}.json"));
-    let table = run(Command::new(bin.join("hakk-eval"))
+    let table = run(Command::new(bin.join(exe("hakk-eval")))
         .arg(manifest)
         .arg(recovered)
         .args(["--tool", tool, "--elapsed", &elapsed.to_string(), "--json"])
@@ -195,6 +197,11 @@ fn workspace_root() -> Result<PathBuf> {
         .parent()
         .map(Path::to_path_buf)
         .context("cannot find the workspace root")
+}
+
+/// Appends the platform's executable suffix (`.exe` on Windows).
+fn exe(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
 }
 
 fn which(name: &str) -> Option<PathBuf> {

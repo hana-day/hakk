@@ -10,9 +10,11 @@
     clippy::unwrap_used
 )]
 
+mod common;
+
 use std::{io::Write, path::Path, process::Command};
 
-use blocksource::{Aligned, BlockSource, Device, ImageFile, ReadErrorKind};
+use blocksource::{Device, ImageFile};
 
 /// An attached disk, detached on drop.
 struct Attached {
@@ -59,64 +61,17 @@ impl Drop for Attached {
     }
 }
 
-fn pattern(len: usize) -> Vec<u8> {
-    let mut x = 0x1234_5678_u32;
-    (0..len)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            x as u8
-        })
-        .collect()
-}
-
 #[test]
 #[ignore = "attaches a disk with hdiutil"]
 fn raw_device_matches_image() {
-    let data = pattern(8 << 20);
+    let data = common::pattern(8 << 20);
     let mut img = tempfile::NamedTempFile::new().unwrap();
     img.write_all(&data).unwrap();
     img.flush().unwrap();
 
     let attached = Attached::new(img.path());
     let dev = Device::open(attached.raw()).unwrap();
-    assert_eq!(dev.len(), data.len() as u64);
-    assert_eq!(dev.sector_size(), 512);
-
-    // Aligned reads work as is.
-    let mut buf = vec![0; 1 << 20];
-    for off in [0u64, 512, 3 << 20, (8 << 20) - (1 << 20)] {
-        dev.read_exact_at(off, &mut buf).unwrap();
-        assert_eq!(buf, data[off as usize..off as usize + buf.len()]);
-    }
-
-    // Misaligned reads are rejected without reaching the OS.
-    let err = dev.read_at(1, &mut [0; 512]).unwrap_err();
-    assert!(matches!(err.kind(), ReadErrorKind::Misaligned));
-    let err = dev.read_at(0, &mut [0; 100]).unwrap_err();
-    assert!(matches!(err.kind(), ReadErrorKind::Misaligned));
-
-    // Reads crossing the end are short.
-    let n = dev.read_at((8 << 20) - 512, &mut [0; 4096]).unwrap();
-    assert_eq!(n, 512);
-
-    // Through Aligned, any offset/length matches reading the image file.
-    let aligned = Aligned::new(&dev);
-    let image = ImageFile::open(img.path()).unwrap();
-    let mut seed = 1u64;
-    for _ in 0..500 {
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        let off = (seed >> 33) % (data.len() as u64 + 1000);
-        let len = ((seed >> 13) % 70_000) as usize;
-        let (mut a, mut b) = (vec![0; len], vec![0; len]);
-        let na = aligned.read_at(off, &mut a).unwrap();
-        let nb = image.read_at(off, &mut b).unwrap();
-        assert_eq!(na, nb, "off={off} len={len}");
-        assert_eq!(a[..na], b[..nb]);
-    }
+    common::check_device(&dev, &data, &ImageFile::open(img.path()).unwrap());
 }
 
 #[test]

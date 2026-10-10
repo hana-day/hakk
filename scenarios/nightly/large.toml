@@ -1,0 +1,45 @@
+# Large: a 1 GiB card with several rounds of shooting and deleting, like a camera in use.
+name = "large"
+seed = 100
+size = "1024MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 300
+min_size = "500KiB"
+max_size = "2MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+count = 10
+min_size = "10MiB"
+max_size = "40MiB"
+dir = "DCIM/101HAKK"
+
+[[steps]]
+op = "delete"
+fraction = 0.4
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 100
+min_size = "1MiB"
+max_size = "4MiB"
+dir = "DCIM/102HAKK"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+dir = "DCIM/102HAKK"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+count = 4
+min_size = "10MiB"
+max_size = "30MiB"
+dir = "DCIM/103HAKK"
