@@ -6,6 +6,7 @@
 mod exif;
 mod jpeg;
 mod mp4;
+mod picture;
 pub mod profile;
 
 use anyhow::{Result, bail};
