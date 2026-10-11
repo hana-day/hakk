@@ -3,4 +3,4 @@
 /**
  * State of one cell of the disk map.
  */
-export type MapCell = "unread" | "read" | "found" | "error";
+export type MapCell = "skipped" | "unread" | "read" | "found" | "error";

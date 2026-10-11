@@ -127,6 +127,8 @@ pub enum ScanState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub enum MapCell {
+    /// Outside what this scan reads (e.g. allocated space in a free-space-only scan).
+    Skipped,
     Unread,
     Read,
     /// Read, and at least one file starts in this cell.

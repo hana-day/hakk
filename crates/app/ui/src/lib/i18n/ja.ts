@@ -58,6 +58,7 @@ export const ja = {
   },
   diskMap: {
     label: 'ディスクマップ：先頭から{percent}%まで読み取り済み',
+    skipped: '対象外',
     unread: '未読み取り',
     read: '読み取り済み',
     found: 'ファイルを発見',
