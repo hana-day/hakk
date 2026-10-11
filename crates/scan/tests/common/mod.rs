@@ -233,9 +233,12 @@ impl Analyzer for MetaReader {
             extents: vec![reply.offset..reply.offset + reply.data.len() as u64],
             size: reply.data.len() as u64,
             name: Some("from-metadata.mov".into()),
+            volume: None,
             folder: vec!["DCIM".into()],
+            name_exact: true,
             fs_ref: Some("meta:1".into()),
             deleted: true,
+            confidence: None,
             preview: Preview::default(),
         });
     }

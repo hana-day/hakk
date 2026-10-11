@@ -203,8 +203,25 @@ fn bad_sectors_are_skipped_then_retried_at_the_end() {
         .clock(clock.clone())
         .start(store.clone())
         .unwrap();
-    let (summary, _) = finish(handle);
+    let (summary, events) = finish(handle);
     assert_eq!(summary.outcome, Outcome::Completed);
+
+    // While retrying, progress names the pass and points at the area being retried.
+    let retrying: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Progress(p) if matches!(p.phase, Phase::Retrying { .. }) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert!(!retrying.is_empty());
+    for p in &retrying {
+        let r = p.retry.expect("retry progress");
+        assert!(matches!(p.phase, Phase::Retrying { pass } if pass == r.pass));
+        assert_eq!(r.passes, 2);
+        assert_eq!(r.bytes_left, p.bad_bytes);
+        assert_eq!((p.bytes_per_sec, p.remaining), (None, None));
+    }
 
     // The main pass only moved forward and reached the end before any retry.
     let log = disk.log();

@@ -158,6 +158,8 @@ pub enum Status {
     Damaged,
     /// The data looks present but the index the player needs (e.g. MP4 `moov`) is missing.
     MissingIndex,
+    /// Repaired; the repaired copy plays. The original stays on the disk untouched.
+    Repaired,
 }
 
 impl Status {
@@ -167,6 +169,7 @@ impl Status {
             Status::Recoverable => 1,
             Status::Damaged => 2,
             Status::MissingIndex => 3,
+            Status::Repaired => 4,
         }
     }
 
@@ -176,8 +179,75 @@ impl Status {
             1 => Some(Status::Recoverable),
             2 => Some(Status::Damaged),
             3 => Some(Status::MissingIndex),
+            4 => Some(Status::Repaired),
             _ => None,
         }
+    }
+}
+
+/// How likely a file's data is still intact, judged from its placement before the
+/// content is verified (file system analysis).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Confidence {
+    /// Some of its space now belongs to other data, or the placement is incomplete.
+    Low,
+    /// The placement is inferred (e.g. assumed contiguous) and nothing reuses it.
+    Medium,
+    /// The placement is known and nothing reuses it.
+    High,
+}
+
+impl Confidence {
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            Confidence::Low => 0,
+            Confidence::Medium => 1,
+            Confidence::High => 2,
+        }
+    }
+
+    pub(crate) fn from_code(code: i64) -> Option<Self> {
+        match code {
+            0 => Some(Confidence::Low),
+            1 => Some(Confidence::Medium),
+            2 => Some(Confidence::High),
+            _ => None,
+        }
+    }
+}
+
+/// A partition (volume) on the scanned drive.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Volume {
+    /// Zero-based position of the partition on the drive.
+    pub index: u32,
+    pub label: Option<String>,
+}
+
+/// Whether `s` is an ISO 8601 local date-time without a time zone, as stored for dates:
+/// `YYYY-MM-DDTHH:MM:SS`, optionally followed by `.` and 1-9 digits of fractional seconds.
+pub fn is_local_datetime(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits = |r: std::ops::Range<usize>| {
+        b.get(r)
+            .is_some_and(|d| !d.is_empty() && d.iter().all(u8::is_ascii_digit))
+    };
+    let at = |i: usize, c: u8| b.get(i) == Some(&c);
+    let base = digits(0..4)
+        && at(4, b'-')
+        && digits(5..7)
+        && at(7, b'-')
+        && digits(8..10)
+        && at(10, b'T')
+        && digits(11..13)
+        && at(13, b':')
+        && digits(14..16)
+        && at(16, b':')
+        && digits(17..19);
+    match b.len() {
+        19 => base,
+        n if (21..=29).contains(&n) => base && at(19, b'.') && digits(20..n),
+        _ => false,
     }
 }
 
@@ -188,15 +258,17 @@ pub struct Preview {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub duration_ms: Option<u64>,
-    /// Capture time (EXIF / `mvhd`), seconds since the Unix epoch.
-    pub taken_at: Option<i64>,
+    /// Capture time embedded in the file (EXIF, QuickTime metadata), as an ISO 8601 local
+    /// date-time without a time zone (see [`is_local_datetime`]). Kept as recorded: EXIF
+    /// and FAT do not reliably say which zone they are in.
+    pub taken_at: Option<String>,
     /// Camera model (e.g. EXIF `Model`).
     pub camera: Option<String>,
     /// An embedded thumbnail (e.g. the EXIF thumbnail), as a byte range on the source.
     pub thumbnail: Option<Range<u64>>,
-    /// File system timestamps, seconds since the Unix epoch.
-    pub created_at: Option<i64>,
-    pub modified_at: Option<i64>,
+    /// File system timestamps, in the same format as `taken_at`.
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
 }
 
 /// A file found by the scan, before it is stored.
@@ -208,20 +280,29 @@ pub struct NewFile {
     pub kind: FileKind,
     pub status: Status,
     /// Where the data is on the source, in file order. Carving yields a single extent;
-    /// file system analysis may yield several (fragmented files). Must not be empty.
+    /// file system analysis may yield several (fragmented files), or none when the
+    /// location is lost (e.g. a deleted entry whose first cluster is unknown).
     pub extents: Vec<Range<u64>>,
     /// Logical file size. May be less than the extents' total (the last cluster is
     /// usually only partly used).
     pub size: u64,
     /// File name (file system only).
     pub name: Option<String>,
-    /// Folder path components from the root (file system only). Empty means the root.
+    /// The partition the file system entry belongs to (file system only).
+    pub volume: Option<Volume>,
+    /// Folder path components below the volume root (file system only). Empty means
+    /// the root.
     pub folder: Vec<String>,
+    /// `false` when part of the name was lost and guessed (the first character of a
+    /// deleted FAT short name).
+    pub name_exact: bool,
     /// File system identity, unique per scanned file system (e.g. `"exfat:entry:0x1a2b00"`,
     /// `"ntfs:mft:1234"`). Re-reporting the same identity does not create a second record.
     pub fs_ref: Option<String>,
     /// Whether the file system marks the file as deleted (file system only).
     pub deleted: bool,
+    /// Placement confidence from file system analysis; `None` if not judged.
+    pub confidence: Option<Confidence>,
     pub preview: Preview,
 }
 
@@ -235,9 +316,12 @@ impl NewFile {
             extents: std::iter::once(offset..offset.saturating_add(len)).collect(),
             size: len,
             name: None,
+            volume: None,
             folder: Vec::new(),
+            name_exact: true,
             fs_ref: None,
             deleted: true,
+            confidence: None,
             preview: Preview::default(),
         }
     }
@@ -256,14 +340,18 @@ pub struct FileRecord {
     pub origin: Origin,
     pub kind: FileKind,
     pub status: Status,
-    /// Start of the first extent.
-    pub offset: u64,
+    /// Start of the first extent; `None` when the location is unknown.
+    pub offset: Option<u64>,
     pub size: u64,
     pub name: Option<String>,
-    /// Folder id (see [`crate::Index::folder_path`]); `None` for carving results.
+    pub volume: Option<Volume>,
+    /// Folder id (see [`crate::Index::folder_path`]); `None` for carving results and
+    /// files in a volume's root.
     pub folder_id: Option<i64>,
+    pub name_exact: bool,
     pub fs_ref: Option<String>,
     pub deleted: bool,
+    pub confidence: Option<Confidence>,
     /// Set when this record was found to be the same file as another one (e.g. a carving
     /// result matching a named file system record). Merged records are hidden from listings.
     pub merged_into: Option<i64>,
@@ -350,6 +438,7 @@ pub struct Counts {
     pub recoverable: u64,
     pub damaged: u64,
     pub missing_index: u64,
+    pub repaired: u64,
     pub unknown: u64,
 }
 

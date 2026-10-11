@@ -77,7 +77,21 @@ pub struct Progress {
     pub found: FoundCounts,
     /// Bytes currently known to be unreadable.
     pub bad_bytes: u64,
+    /// Set while retrying bad ranges ([`Phase::Retrying`]).
+    pub retry: Option<RetryProgress>,
     pub map: DiskMap,
+}
+
+/// Progress of the retry phase. Speed and remaining time are not meaningful here (each
+/// failed read can take seconds), so they are `None` while retrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryProgress {
+    /// The current pass, starting at 1.
+    pub pass: u32,
+    /// Passes configured ([`crate::Scan::retry_passes`]).
+    pub passes: u32,
+    /// Bytes still unreadable.
+    pub bytes_left: u64,
 }
 
 impl Progress {

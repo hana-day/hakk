@@ -19,7 +19,8 @@ use crate::{
     clock::Clock,
     msg::{Command, CoordMsg},
     progress::{
-        Event, FoundCounts, MapTracker, Outcome, Phase, Progress, RateMeter, RunState, Summary,
+        Event, FoundCounts, MapTracker, Outcome, Phase, Progress, RateMeter, RetryProgress,
+        RunState, Summary,
     },
     ranges::{RangeMap, RangeSet},
     store::{Store, StoreError},
@@ -34,6 +35,7 @@ pub(crate) struct CoordConfig {
     pub(crate) checkpoint_interval: Duration,
     pub(crate) source_len: u64,
     pub(crate) sector_size: u32,
+    pub(crate) retry_passes: u32,
 }
 
 /// A block whose analysis (including reads it led to) is not finished yet.
@@ -78,7 +80,7 @@ pub(crate) struct CoordInit {
     pub(crate) done: RangeSet,
     pub(crate) bad: RangeMap<u32>,
     pub(crate) retry_passes: u32,
-    pub(crate) known_files: Vec<(u64, Media)>,
+    pub(crate) known_files: Vec<(Option<u64>, Media)>,
     pub(crate) initial_findings: Vec<Finding>,
     pub(crate) map_cells: usize,
 }
@@ -109,7 +111,9 @@ impl Coordinator {
         }
         let mut found = FoundCounts::default();
         for (offset, media) in init.known_files {
-            map.mark_found(offset);
+            if let Some(offset) = offset {
+                map.mark_found(offset);
+            }
             count(&mut found, media);
         }
         let now = clock.now();
@@ -195,6 +199,7 @@ impl Coordinator {
                 self.bad.insert(range.clone(), attempts);
                 self.map.refresh_errors(range, &self.bad);
             }
+            CoordMsg::RetryPosition(pos) => self.position = pos,
             CoordMsg::Recovered(range) => {
                 self.bad.remove(range.clone());
                 self.map.refresh_errors(range, &self.bad);
@@ -261,7 +266,7 @@ impl Coordinator {
             planned_bytes: self.planned_bytes,
             scanned_bytes: self.scanned_bytes,
             position: self.position,
-            bytes_per_sec: self.rate.rate().filter(|_| running),
+            bytes_per_sec: self.rate.rate().filter(|_| running && main_pass),
             remaining: if running && main_pass {
                 self.rate.remaining(left)
             } else {
@@ -270,6 +275,14 @@ impl Coordinator {
             elapsed: self.clock.now().saturating_sub(self.started),
             found: self.found,
             bad_bytes: self.bad.total_len(),
+            retry: match self.phase {
+                Phase::Retrying { pass } => Some(RetryProgress {
+                    pass,
+                    passes: self.cfg.retry_passes,
+                    bytes_left: self.bad.total_len(),
+                }),
+                _ => None,
+            },
             map: self.map.snapshot(),
         }
     }

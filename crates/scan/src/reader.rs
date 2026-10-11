@@ -589,6 +589,7 @@ impl Reader {
             .saturating_add(self.cfg.retry_chunk)
             .min(range.end);
         let chunk = range.start..chunk_end;
+        let _ = self.ch.coord.send(CoordMsg::RetryPosition(chunk.start));
         if chunk_end < range.end {
             self.retry_queue.push_front(chunk_end..range.end);
         }

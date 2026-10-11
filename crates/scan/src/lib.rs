@@ -43,7 +43,8 @@ use index::{Media, ScanState, SourceInfo};
 pub use analyzer::{Analyzer, Block, Context, Priority, ReadReply, ReadRequest};
 pub use clock::{Clock, SystemClock};
 pub use progress::{
-    CellState, DiskMap, Event, FoundCounts, Outcome, Phase, Progress, RunState, Summary,
+    CellState, DiskMap, Event, FoundCounts, Outcome, Phase, Progress, RetryProgress, RunState,
+    Summary,
 };
 pub use ranges::{RangeMap, RangeSet};
 pub use reader::MAX_REQUEST_LEN;
@@ -69,7 +70,7 @@ pub struct Scan {
     ranges: Option<Vec<Range<u64>>>,
     resume: Option<ScanState>,
     label: String,
-    known_files: Vec<(u64, Media)>,
+    known_files: Vec<(Option<u64>, Media)>,
     block_size: usize,
     workers: usize,
     retry_passes: u32,
@@ -141,9 +142,9 @@ impl Scan {
         self
     }
 
-    /// Files found by an earlier session of a resumed scan, so counts and the disk map
-    /// include them.
-    pub fn known_files(mut self, files: impl IntoIterator<Item = (u64, Media)>) -> Self {
+    /// Files found by an earlier session of a resumed scan (offset if known, media), so
+    /// counts and the disk map include them.
+    pub fn known_files(mut self, files: impl IntoIterator<Item = (Option<u64>, Media)>) -> Self {
         self.known_files = files.into_iter().collect();
         self
     }
@@ -371,6 +372,7 @@ impl Scan {
                         checkpoint_interval: self.checkpoint_interval,
                         source_len: len,
                         sector_size,
+                        retry_passes: self.retry_passes,
                     },
                     coord_rx,
                     event_tx,

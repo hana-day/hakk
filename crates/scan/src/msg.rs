@@ -82,6 +82,8 @@ pub(crate) enum CoordMsg {
         attempts: u32,
     },
     Recovered(Range<u64>),
+    /// Where a retry pass is reading.
+    RetryPosition(u64),
     RetryPassDone(u32),
     /// A worker finished a job.
     ///

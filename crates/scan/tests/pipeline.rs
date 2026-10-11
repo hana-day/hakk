@@ -238,7 +238,7 @@ fn cancelled_scan_resumes_from_the_index() {
     assert!(first_session < sigs.len());
 
     // Second session (the app was reopened).
-    let known: Vec<(u64, Media)> = ix
+    let known: Vec<(Option<u64>, Media)> = ix
         .files(&Query::default())
         .unwrap()
         .iter()
@@ -262,7 +262,7 @@ fn cancelled_scan_resumes_from_the_index() {
         .files(&Query::default())
         .unwrap()
         .iter()
-        .map(|f| f.offset)
+        .filter_map(|f| f.offset)
         .collect();
     offsets.sort_unstable();
     assert_eq!(offsets, sigs, "every file exactly once");

@@ -17,13 +17,19 @@ pub(crate) struct Migration {
     pub(crate) sql: &'static str,
 }
 
-pub(crate) const MIGRATIONS: &[Migration] = &[Migration {
-    description: "initial schema",
-    sql: V1,
-}];
+pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        description: "initial schema",
+        sql: V1,
+    },
+    Migration {
+        description: "volumes, unknown offsets, confidence, guessed names, local dates",
+        sql: V2,
+    },
+];
 
 /// The schema version this build reads and writes. Always equals `MIGRATIONS.len()`.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const V1: &str = "
 CREATE TABLE meta (
@@ -93,6 +99,77 @@ CREATE TABLE bad_ranges (
 ) STRICT, WITHOUT ROWID;
 ";
 
+/// v2:
+/// - `volumes`: partitions; folders and file system records belong to one, so two
+///   partitions with the same folder names no longer share folders.
+/// - `files.disk_offset` may be NULL: a file system entry whose location is lost.
+/// - `files.name_exact`, `files.confidence` from file system analysis.
+/// - Dates become ISO 8601 local date-time text: EXIF and FAT record local time with no
+///   zone, so converting them to an instant would invent one.
+///
+/// SQLite cannot relax a NOT NULL column in place, so `files` is rebuilt (the documented
+/// "create new table, copy, drop, rename" procedure; foreign keys are off during
+/// migrations, see [`migrate_with`]).
+const V2: &str = "
+CREATE TABLE volumes (
+    id         INTEGER PRIMARY KEY,
+    part_index INTEGER NOT NULL UNIQUE,
+    label      TEXT
+) STRICT;
+
+ALTER TABLE folders ADD COLUMN volume_id INTEGER REFERENCES volumes (id);
+DROP INDEX folders_parent_name;
+CREATE UNIQUE INDEX folders_parent_name
+    ON folders (ifnull(volume_id, 0), ifnull(parent_id, 0), name);
+
+CREATE TABLE files_v2 (
+    id           INTEGER PRIMARY KEY,
+    origin       INTEGER NOT NULL,  -- 1 = file system, 2 = carving
+    kind         TEXT NOT NULL,     -- FileKind code
+    status       INTEGER NOT NULL,  -- Status code
+    disk_offset  INTEGER,           -- start of the first extent; NULL if unknown
+    size         INTEGER NOT NULL,
+    name         TEXT,
+    volume_id    INTEGER REFERENCES volumes (id),
+    folder_id    INTEGER REFERENCES folders (id),
+    name_exact   INTEGER NOT NULL,
+    fs_ref       TEXT,
+    deleted      INTEGER NOT NULL,
+    confidence   INTEGER,           -- Confidence code; NULL if not judged
+    merged_into  INTEGER REFERENCES files (id),
+    width        INTEGER,
+    height       INTEGER,
+    duration_ms  INTEGER,
+    taken_at     TEXT,              -- ISO 8601 local date-time, no zone
+    camera       TEXT,
+    thumb_offset INTEGER,
+    thumb_len    INTEGER,
+    created_at   TEXT,
+    modified_at  TEXT
+) STRICT;
+
+-- v1 stored dates as Unix seconds; render them as they were written (UTC).
+INSERT INTO files_v2 (id, origin, kind, status, disk_offset, size, name, volume_id,
+    folder_id, name_exact, fs_ref, deleted, confidence, merged_into, width, height,
+    duration_ms, taken_at, camera, thumb_offset, thumb_len, created_at, modified_at)
+SELECT id, origin, kind, status, disk_offset, size, name, NULL,
+    folder_id, 1, fs_ref, deleted, NULL, merged_into, width, height,
+    duration_ms,
+    strftime('%Y-%m-%dT%H:%M:%S', taken_at, 'unixepoch'),
+    camera, thumb_offset, thumb_len,
+    strftime('%Y-%m-%dT%H:%M:%S', created_at, 'unixepoch'),
+    strftime('%Y-%m-%dT%H:%M:%S', modified_at, 'unixepoch')
+FROM files;
+
+DROP TABLE files;
+ALTER TABLE files_v2 RENAME TO files;
+
+CREATE INDEX files_disk_offset ON files (disk_offset);
+CREATE INDEX files_folder ON files (folder_id);
+CREATE UNIQUE INDEX files_carved_identity ON files (disk_offset, kind) WHERE origin = 2;
+CREATE UNIQUE INDEX files_fs_identity ON files (fs_ref) WHERE origin = 1 AND fs_ref IS NOT NULL;
+";
+
 /// Brings the schema up to the latest version.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), Error> {
     migrate_with(conn, MIGRATIONS)
@@ -116,18 +193,31 @@ pub(crate) fn migrate_with(conn: &mut Connection, migrations: &[Migration]) -> R
         }
     }
 
+    // Rebuilding a table (drop + rename) must not trigger ON DELETE CASCADE, so foreign
+    // keys are off while migrating (the pragma has no effect inside a transaction) and
+    // checked before each commit instead.
+    conn.pragma_update(None, "foreign_keys", false)?;
     for (version, migration) in (1u32..).zip(migrations).skip(current as usize) {
+        let failed = |source| Error::Migration {
+            version,
+            description: migration.description,
+            source,
+        };
         let tx = conn.transaction()?;
-        tx.execute_batch(migration.sql)
-            .map_err(|e| Error::Migration {
-                version,
-                description: migration.description,
-                source: e,
-            })?;
+        tx.execute_batch(migration.sql).map_err(failed)?;
+        let violation: Option<String> = tx
+            .query_row("PRAGMA foreign_key_check", [], |r| r.get(0))
+            .optional()?;
+        if let Some(table) = violation {
+            return Err(Error::Corrupt(format!(
+                "schema version {version} leaves a dangling reference in {table}"
+            )));
+        }
         tx.pragma_update(None, "application_id", APPLICATION_ID)?;
         tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(())
 }
 
@@ -172,6 +262,54 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn).unwrap();
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+    }
+
+    /// A database written by schema version 1, with data, upgrades without losing any.
+    #[test]
+    fn v1_data_survives_the_upgrade_to_v2() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        migrate_with(&mut conn, &MIGRATIONS[..1]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO folders (id, parent_id, name) VALUES (1, NULL, 'DCIM');
+             INSERT INTO files (id, origin, kind, status, disk_offset, size, name, folder_id,
+                 fs_ref, deleted, merged_into, taken_at, modified_at)
+             VALUES (1, 1, 'mov', 1, 4096, 8192, 'clip.mov', 1, 'x:1', 1, NULL,
+                 1723649422, 1723649400),
+                    (2, 2, 'mp4', 0, 4096, 8192, NULL, NULL, NULL, 1, 1, NULL, NULL);
+             INSERT INTO extents (file_id, seq, disk_offset, len)
+             VALUES (1, 0, 4096, 4096), (1, 1, 65536, 4096), (2, 0, 4096, 8192);",
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 2);
+        // Rebuilding `files` must not cascade into `extents`.
+        let extents: i64 = conn
+            .query_row("SELECT count(*) FROM extents", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(extents, 3);
+        let (taken, modified, exact, merged): (String, String, bool, Option<i64>) = conn
+            .query_row(
+                "SELECT taken_at, modified_at, name_exact, (SELECT merged_into FROM files \
+                 WHERE id = 2) FROM files WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(taken, "2024-08-14T15:30:22");
+        assert_eq!(modified, "2024-08-14T15:30:00");
+        assert!(exact);
+        assert_eq!(merged, Some(1));
+        let fk: bool = conn
+            .pragma_query_value(None, "foreign_keys", |r| r.get(0))
+            .unwrap();
+        assert!(fk, "foreign keys are back on");
+        // The rebuilt table still enforces its references.
+        assert!(
+            conn.execute("UPDATE files SET merged_into = 99 WHERE id = 2", [])
+                .is_err()
+        );
     }
 
     #[test]

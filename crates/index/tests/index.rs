@@ -1,8 +1,8 @@
 #![allow(clippy::single_range_in_vec_init)]
 
 use index::{
-    BadRange, FileKind, Index, Media, NewFile, Origin, Preview, Query, SCHEMA_VERSION, ScanPhase,
-    ScanProgress, SourceInfo, Status,
+    BadRange, Confidence, FileKind, Index, Media, NewFile, Origin, Preview, Query, SCHEMA_VERSION,
+    ScanPhase, ScanProgress, SourceInfo, Status, Volume,
 };
 
 fn named(
@@ -19,9 +19,15 @@ fn named(
         extents,
         size,
         name: Some(name.into()),
+        volume: Some(Volume {
+            index: 0,
+            label: Some("EOS_DIGITAL".into()),
+        }),
         folder: folder.iter().map(|s| s.to_string()).collect(),
+        name_exact: true,
         fs_ref: Some(format!("test:{name}")),
         deleted: true,
+        confidence: Some(Confidence::High),
         preview: Preview::default(),
     }
 }
@@ -51,7 +57,7 @@ fn stores_carved_and_named_files() {
     assert_eq!(all.len(), 2);
     let c = &all[0];
     assert_eq!(
-        (c.origin, c.kind, c.offset, c.size),
+        (c.origin, c.kind, c.offset.unwrap(), c.size),
         (Origin::Carving, FileKind::Jpeg, 4096, 1000)
     );
     assert_eq!(c.preview.width, Some(640));
@@ -59,14 +65,19 @@ fn stores_carved_and_named_files() {
 
     let f = &all[1];
     assert_eq!(f.name.as_deref(), Some("clip.mov"));
-    assert_eq!(f.offset, 1 << 20);
+    assert_eq!(f.offset, Some(1 << 20));
+    assert_eq!(f.confidence, Some(Confidence::High));
+    assert_eq!(
+        f.volume.as_ref().unwrap().label.as_deref(),
+        Some("EOS_DIGITAL")
+    );
     assert_eq!(
         ix.extents(f.id).unwrap(),
         vec![1 << 20..(1 << 20) + 8192, 3 << 20..(3 << 20) + 4096]
     );
     let folder = f.folder_id.unwrap();
     assert_eq!(ix.folder_path(folder).unwrap(), ["DCIM", "100CANON"]);
-    let roots = ix.subfolders(None).unwrap();
+    let roots = ix.root_folders(0).unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].1, "DCIM");
 
@@ -125,7 +136,7 @@ fn incremental_listing_by_id() {
         })
         .unwrap();
     assert_eq!(
-        new.iter().map(|f| f.offset).collect::<Vec<_>>(),
+        new.iter().map(|f| f.offset.unwrap()).collect::<Vec<_>>(),
         [512, 1024]
     );
 }
@@ -236,7 +247,7 @@ fn scan_state_survives_reopening() {
     // Folder ids are looked up again after reopening, not duplicated.
     ix.insert(&[named("b.jpg", &["DCIM"], FileKind::Jpeg, vec![9000..9100])])
         .unwrap();
-    assert_eq!(ix.subfolders(None).unwrap().len(), 1);
+    assert_eq!(ix.root_folders(0).unwrap().len(), 1);
 
     // A new scan clears coverage but keeps files.
     ix.begin_scan(&source(), &[0..1 << 30]).unwrap();
@@ -262,4 +273,97 @@ fn offsets_beyond_i64_are_rejected() {
     let mut ix = Index::open_in_memory().unwrap();
     let f = NewFile::carved(FileKind::Jpeg, u64::MAX - 10, 5);
     assert!(matches!(ix.insert(&[f]), Err(index::Error::OutOfRange(_))));
+}
+
+#[test]
+fn file_system_entries_without_a_location_are_kept() {
+    let mut ix = Index::open_in_memory().unwrap();
+    let mut lost = named("IMG_0001.JPG", &["DCIM"], FileKind::Jpeg, Vec::new());
+    lost.size = 3_000_000;
+    lost.name_exact = false;
+    lost.confidence = Some(Confidence::Low);
+    ix.insert(&[lost]).unwrap();
+    let f = &ix.files(&Query::default()).unwrap()[0];
+    assert_eq!(f.offset, None);
+    assert_eq!(f.size, 3_000_000);
+    assert!(!f.name_exact);
+    assert_eq!(ix.extents(f.id).unwrap(), []);
+    // Nothing to merge with without a location.
+    ix.insert(&[NewFile::carved(FileKind::Jpeg, 0, 10)])
+        .unwrap();
+    assert_eq!(ix.merge_duplicates().unwrap(), 0);
+
+    // Carving results always have one.
+    let mut carved = NewFile::carved(FileKind::Jpeg, 0, 10);
+    carved.extents.clear();
+    assert!(ix.insert(&[carved]).is_err());
+}
+
+#[test]
+fn folders_belong_to_their_volume() {
+    let mut ix = Index::open_in_memory().unwrap();
+    let mut a = named("a.jpg", &["DCIM"], FileKind::Jpeg, vec![0..10]);
+    let mut b = named("b.jpg", &["DCIM"], FileKind::Jpeg, vec![512..600]);
+    b.volume = Some(Volume {
+        index: 1,
+        label: None,
+    });
+    a.fs_ref = Some("p0:a".into());
+    b.fs_ref = Some("p1:b".into());
+    ix.insert(&[a, b]).unwrap();
+    let files = ix.files(&Query::default()).unwrap();
+    assert_ne!(files[0].folder_id, files[1].folder_id);
+    assert_eq!(ix.root_folders(0).unwrap().len(), 1);
+    assert_eq!(ix.root_folders(1).unwrap().len(), 1);
+    let volumes = ix.volumes().unwrap();
+    assert_eq!(volumes.len(), 2);
+    assert_eq!(volumes[1].label, None);
+
+    // A later report with the label fills it in.
+    let mut c = named("c.jpg", &[], FileKind::Jpeg, vec![1024..1100]);
+    c.volume = Some(Volume {
+        index: 1,
+        label: Some("BACKUP".into()),
+    });
+    ix.insert(&[c]).unwrap();
+    assert_eq!(ix.volumes().unwrap()[1].label.as_deref(), Some("BACKUP"));
+    assert_eq!(
+        ix.root_folders(1).unwrap().len(),
+        1,
+        "same volume, not a new one"
+    );
+}
+
+#[test]
+fn dates_are_local_date_times() {
+    let mut ix = Index::open_in_memory().unwrap();
+    let mut f = named("a.jpg", &[], FileKind::Jpeg, vec![0..10]);
+    f.preview.taken_at = Some("2025-08-14T15:30:22".into());
+    f.preview.modified_at = Some("2025-08-14T15:30:22.5".into());
+    ix.insert(&[f.clone()]).unwrap();
+    let r = &ix.files(&Query::default()).unwrap()[0];
+    assert_eq!(r.preview.taken_at.as_deref(), Some("2025-08-14T15:30:22"));
+    assert_eq!(
+        r.preview.modified_at.as_deref(),
+        Some("2025-08-14T15:30:22.5")
+    );
+
+    for bad in [
+        "2025-08-14 15:30:22",
+        "2025-08-14T15:30:22Z",
+        "1723649422",
+        "2025-08-14",
+    ] {
+        f.fs_ref = Some(bad.into());
+        f.preview.taken_at = Some(bad.into());
+        assert!(ix.insert(&[f.clone()]).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn repaired_files_are_counted() {
+    let mut ix = Index::open_in_memory().unwrap();
+    ix.insert(&[NewFile::carved(FileKind::Mp4, 0, 10)]).unwrap();
+    ix.set_status(1, Status::Repaired).unwrap();
+    assert_eq!(ix.counts().unwrap().repaired, 1);
 }

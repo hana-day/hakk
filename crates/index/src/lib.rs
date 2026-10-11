@@ -24,8 +24,8 @@ use rusqlite::{
 
 pub use error::Error;
 pub use model::{
-    BadRange, Counts, FileKind, FileRecord, Media, NewFile, Origin, Preview, ScanPhase,
-    ScanProgress, ScanState, SourceInfo, Status, UnknownKind,
+    BadRange, Confidence, Counts, FileKind, FileRecord, Media, NewFile, Origin, Preview, ScanPhase,
+    ScanProgress, ScanState, SourceInfo, Status, UnknownKind, Volume, is_local_datetime,
 };
 pub use schema::SCHEMA_VERSION;
 
@@ -48,8 +48,17 @@ pub struct Query {
 /// A scan result index backed by SQLite.
 pub struct Index {
     conn: Connection,
-    /// (parent, name) -> folder id.
-    folders: HashMap<(Option<i64>, String), i64>,
+    ids: IdCache,
+}
+
+/// Ids of volumes and folders already in the database, to avoid looking them up for
+/// every file. Cleared when a transaction fails (it may hold rolled-back rows).
+#[derive(Default)]
+struct IdCache {
+    /// Partition index -> (volume id, whether its label is known).
+    volumes: HashMap<u32, (i64, bool)>,
+    /// (volume id, parent folder id, name) -> folder id.
+    folders: HashMap<(Option<i64>, Option<i64>, String), i64>,
 }
 
 impl std::fmt::Debug for Index {
@@ -58,9 +67,12 @@ impl std::fmt::Debug for Index {
     }
 }
 
-const FILE_COLUMNS: &str = "id, origin, kind, status, disk_offset, size, name, folder_id, fs_ref, \
-     deleted, merged_into, width, height, duration_ms, taken_at, camera, thumb_offset, \
-     thumb_len, created_at, modified_at";
+/// Columns read by `file_from_row`, from `FILE_FROM`.
+const FILE_COLUMNS: &str = "f.id, f.origin, f.kind, f.status, f.disk_offset, f.size, f.name, \
+     f.folder_id, f.fs_ref, f.deleted, f.merged_into, f.width, f.height, f.duration_ms, \
+     f.taken_at, f.camera, f.thumb_offset, f.thumb_len, f.created_at, f.modified_at, \
+     f.name_exact, f.confidence, v.part_index, v.label";
+const FILE_FROM: &str = "files AS f LEFT JOIN volumes AS v ON v.id = f.volume_id";
 
 impl Index {
     /// Opens (creating if needed) an index file and upgrades its schema.
@@ -81,7 +93,7 @@ impl Index {
         schema::migrate(&mut conn)?;
         Ok(Self {
             conn,
-            folders: HashMap::new(),
+            ids: IdCache::default(),
         })
     }
 
@@ -163,13 +175,13 @@ impl Index {
     /// Returns how many files were new (re-reported files are ignored).
     pub fn commit(&mut self, files: &[NewFile], progress: &ScanProgress) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        let added = insert_files(&tx, &mut self.folders, files)?;
+        let added = insert_files(&tx, &mut self.ids, files)?;
         write_progress(&tx, progress)?;
         match tx.commit() {
             Ok(()) => Ok(added),
             Err(e) => {
                 // Cached folder ids may refer to rolled-back rows.
-                self.folders.clear();
+                self.ids = IdCache::default();
                 Err(e.into())
             }
         }
@@ -180,18 +192,18 @@ impl Index {
     /// Stores files. Returns how many were new (re-reported files are ignored).
     pub fn insert(&mut self, files: &[NewFile]) -> Result<usize> {
         let tx = self.conn.transaction()?;
-        let added = insert_files(&tx, &mut self.folders, files)?;
+        let added = insert_files(&tx, &mut self.ids, files)?;
         match tx.commit() {
             Ok(()) => Ok(added),
             Err(e) => {
-                self.folders.clear();
+                self.ids = IdCache::default();
                 Err(e.into())
             }
         }
     }
 
     pub fn file(&self, id: i64) -> Result<Option<FileRecord>> {
-        let sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE id = ?1");
+        let sql = format!("SELECT {FILE_COLUMNS} FROM {FILE_FROM} WHERE f.id = ?1");
         let mut stmt = self.conn.prepare_cached(&sql)?;
         let mut rows = stmt.query([id])?;
         rows.next()?.map(file_from_row).transpose()
@@ -199,11 +211,11 @@ impl Index {
 
     /// Lists files in the order they were found.
     pub fn files(&self, query: &Query) -> Result<Vec<FileRecord>> {
-        let mut sql = format!("SELECT {FILE_COLUMNS} FROM files WHERE 1");
+        let mut sql = format!("SELECT {FILE_COLUMNS} FROM {FILE_FROM} WHERE 1");
         let mut args: Vec<Value> = Vec::new();
         if let Some(origin) = query.origin {
             args.push(Value::Integer(origin.code()));
-            sql.push_str(&format!(" AND origin = ?{}", args.len()));
+            sql.push_str(&format!(" AND f.origin = ?{}", args.len()));
         }
         if let Some(media) = query.media {
             let kinds: Vec<&str> = model::FileKind::all()
@@ -215,20 +227,20 @@ impl Index {
                 args.push(Value::Text(kind.to_owned()));
                 placeholders.push(format!("?{}", args.len()));
             }
-            sql.push_str(&format!(" AND kind IN ({})", placeholders.join(", ")));
+            sql.push_str(&format!(" AND f.kind IN ({})", placeholders.join(", ")));
         }
         if let Some(after) = query.after_id {
             args.push(Value::Integer(after));
-            sql.push_str(&format!(" AND id > ?{}", args.len()));
+            sql.push_str(&format!(" AND f.id > ?{}", args.len()));
         }
         if let Some(folder) = query.folder_id {
             args.push(Value::Integer(folder));
-            sql.push_str(&format!(" AND folder_id = ?{}", args.len()));
+            sql.push_str(&format!(" AND f.folder_id = ?{}", args.len()));
         }
         if !query.include_merged {
-            sql.push_str(" AND merged_into IS NULL");
+            sql.push_str(" AND f.merged_into IS NULL");
         }
-        sql.push_str(" ORDER BY id");
+        sql.push_str(" ORDER BY f.id");
         if let Some(limit) = query.limit {
             args.push(Value::Integer(i64::from(limit)));
             sql.push_str(&format!(" LIMIT ?{}", args.len()));
@@ -289,12 +301,36 @@ impl Index {
         Ok(path)
     }
 
-    /// Child folders of `parent` (`None` for the root) as `(id, name)`.
-    pub fn subfolders(&self, parent: Option<i64>) -> Result<Vec<(i64, String)>> {
+    /// Top-level folders of a volume (by partition index) as `(id, name)`.
+    pub fn root_folders(&self, volume: u32) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, name FROM folders WHERE parent_id IS ?1 ORDER BY name, id",
+            "SELECT f.id, f.name FROM folders AS f JOIN volumes AS v ON v.id = f.volume_id \
+             WHERE v.part_index = ?1 AND f.parent_id IS NULL ORDER BY f.name, f.id",
+        )?;
+        let rows = stmt.query_map([volume], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Child folders of a folder as `(id, name)`.
+    pub fn subfolders(&self, parent: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id, name FROM folders WHERE parent_id = ?1 ORDER BY name, id",
         )?;
         let rows = stmt.query_map([parent], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Volumes that have file system records, by partition index.
+    pub fn volumes(&self) -> Result<Vec<Volume>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT part_index, label FROM volumes ORDER BY part_index")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Volume {
+                index: r.get(0)?,
+                label: r.get(1)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -332,6 +368,7 @@ impl Index {
                 Status::Recoverable => c.recoverable += n,
                 Status::Damaged => c.damaged += n,
                 Status::MissingIndex => c.missing_index += n,
+                Status::Repaired => c.repaired += n,
             }
         }
         Ok(c)
@@ -427,40 +464,51 @@ fn merge_in(tx: &Transaction<'_>, from: i64, into: i64) -> Result<()> {
     Ok(())
 }
 
-fn insert_files(
-    tx: &Transaction<'_>,
-    folders: &mut HashMap<(Option<i64>, String), i64>,
-    files: &[NewFile],
-) -> Result<usize> {
+fn insert_files(tx: &Transaction<'_>, ids: &mut IdCache, files: &[NewFile]) -> Result<usize> {
     let mut added = 0;
     for file in files {
-        let Some(first) = file.extents.first() else {
-            return Err(Error::InvalidFile("a file needs at least one extent"));
-        };
         if file.extents.iter().any(|e| e.start > e.end) {
             return Err(Error::InvalidFile("extent end before start"));
         }
-        let folder_id = if file.origin == Origin::FileSystem {
-            folder_id(tx, folders, &file.folder)?
-        } else {
-            None
-        };
+        if file.origin == Origin::Carving && file.extents.is_empty() {
+            return Err(Error::InvalidFile("a carving result needs its location"));
+        }
         let p = &file.preview;
+        let dates = [&p.taken_at, &p.created_at, &p.modified_at];
+        if dates
+            .iter()
+            .any(|d| d.as_deref().is_some_and(|d| !is_local_datetime(d)))
+        {
+            return Err(Error::InvalidFile(
+                "dates must be ISO 8601 local date-times (YYYY-MM-DDTHH:MM:SS)",
+            ));
+        }
+        let (volume_id, folder_id) = if file.origin == Origin::FileSystem {
+            let volume_id = file
+                .volume
+                .as_ref()
+                .map(|v| volume_id(tx, ids, v))
+                .transpose()?;
+            (volume_id, folder_id(tx, ids, volume_id, &file.folder)?)
+        } else {
+            (None, None)
+        };
         let thumb = p.thumbnail.as_ref();
         let n = tx
             .prepare_cached(
                 "INSERT INTO files (origin, kind, status, disk_offset, size, name, folder_id, \
                    fs_ref, deleted, width, height, duration_ms, taken_at, camera, \
-                   thumb_offset, thumb_len, created_at, modified_at) \
+                   thumb_offset, thumb_len, created_at, modified_at, volume_id, name_exact, \
+                   confidence) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
-                   ?16, ?17, ?18) \
+                   ?16, ?17, ?18, ?19, ?20, ?21) \
                  ON CONFLICT DO NOTHING",
             )?
             .execute(params![
                 file.origin.code(),
                 file.kind.code(),
                 file.status.code(),
-                to_i64(first.start)?,
+                file.extents.first().map(|e| to_i64(e.start)).transpose()?,
                 to_i64(file.size)?,
                 file.name,
                 folder_id,
@@ -477,6 +525,9 @@ fn insert_files(
                     .transpose()?,
                 p.created_at,
                 p.modified_at,
+                volume_id,
+                file.name_exact,
+                file.confidence.map(Confidence::code),
             ])?;
         if n == 0 {
             continue;
@@ -493,26 +544,50 @@ fn insert_files(
     Ok(added)
 }
 
+fn volume_id(tx: &Transaction<'_>, ids: &mut IdCache, volume: &Volume) -> Result<i64> {
+    if let Some(&(id, labelled)) = ids.volumes.get(&volume.index)
+        && (labelled || volume.label.is_none())
+    {
+        return Ok(id);
+    }
+    // A later report may know the label when an earlier one did not.
+    tx.prepare_cached(
+        "INSERT INTO volumes (part_index, label) VALUES (?1, ?2) \
+         ON CONFLICT (part_index) DO UPDATE SET label = ifnull(excluded.label, label)",
+    )?
+    .execute(params![volume.index, volume.label])?;
+    let id: i64 = tx
+        .prepare_cached("SELECT id FROM volumes WHERE part_index = ?1")?
+        .query_row([volume.index], |r| r.get(0))?;
+    ids.volumes
+        .insert(volume.index, (id, volume.label.is_some()));
+    Ok(id)
+}
+
 fn folder_id(
     tx: &Transaction<'_>,
-    cache: &mut HashMap<(Option<i64>, String), i64>,
+    ids: &mut IdCache,
+    volume: Option<i64>,
     path: &[String],
 ) -> Result<Option<i64>> {
     let mut parent = None;
     for name in path {
-        let key = (parent, name.clone());
-        if let Some(&id) = cache.get(&key) {
+        let key = (volume, parent, name.clone());
+        if let Some(&id) = ids.folders.get(&key) {
             parent = Some(id);
             continue;
         }
         tx.prepare_cached(
-            "INSERT INTO folders (parent_id, name) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+            "INSERT INTO folders (volume_id, parent_id, name) VALUES (?1, ?2, ?3) \
+             ON CONFLICT DO NOTHING",
         )?
-        .execute(params![parent, name])?;
+        .execute(params![volume, parent, name])?;
         let id: i64 = tx
-            .prepare_cached("SELECT id FROM folders WHERE parent_id IS ?1 AND name = ?2")?
-            .query_row(params![parent, name], |r| r.get(0))?;
-        cache.insert(key, id);
+            .prepare_cached(
+                "SELECT id FROM folders WHERE volume_id IS ?1 AND parent_id IS ?2 AND name = ?3",
+            )?
+            .query_row(params![volume, parent, name], |r| r.get(0))?;
+        ids.folders.insert(key, id);
         parent = Some(id);
     }
     Ok(parent)
@@ -536,12 +611,27 @@ fn file_from_row(r: &Row<'_>) -> Result<FileRecord> {
             .ok_or_else(|| Error::Corrupt(format!("bad origin {origin_code}")))?,
         kind: kind.parse()?,
         status: status_from(r.get(3)?)?,
-        offset: from_i64(r.get(4)?)?,
+        offset: r.get::<_, Option<i64>>(4)?.map(from_i64).transpose()?,
         size: from_i64(r.get(5)?)?,
         name: r.get(6)?,
+        volume: match r.get::<_, Option<u32>>(22)? {
+            Some(index) => Some(Volume {
+                index,
+                label: r.get(23)?,
+            }),
+            None => None,
+        },
         folder_id: r.get(7)?,
+        name_exact: r.get(20)?,
         fs_ref: r.get(8)?,
         deleted: r.get(9)?,
+        confidence: match r.get::<_, Option<i64>>(21)? {
+            Some(c) => Some(
+                Confidence::from_code(c)
+                    .ok_or_else(|| Error::Corrupt(format!("bad confidence {c}")))?,
+            ),
+            None => None,
+        },
         merged_into: r.get(10)?,
         preview: Preview {
             width: r.get(11)?,
