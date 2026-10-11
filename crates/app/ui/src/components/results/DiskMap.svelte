@@ -3,6 +3,9 @@
   import { t } from '../../lib/i18n';
 
   let { map, percent, errors }: { map: DiskMap; percent: number; errors: number } = $props();
+
+  // Only scans that read part of the disk have skipped cells; show the legend entry then.
+  const hasSkipped = $derived(map.cells.includes('skipped'));
 </script>
 
 <div class="map-wrap">
@@ -12,6 +15,7 @@
     {/each}
   </div>
   <div class="legend">
+    {#if hasSkipped}<span><i class="cell skipped"></i>{t('diskMap.skipped')}</span>{/if}
     <span><i class="cell unread"></i>{t('diskMap.unread')}</span>
     <span><i class="cell read"></i>{t('diskMap.read')}</span>
     <span><i class="cell found"></i>{t('diskMap.found')}</span>
@@ -25,6 +29,7 @@
   .map { display: grid; grid-template-columns: repeat(48, minmax(0, 1fr)); gap: 2px; }
   .map .cell { display: block; aspect-ratio: 1; }
   .cell { border-radius: 2px; background: var(--track); }
+  .cell.skipped { background: transparent; box-shadow: inset 0 0 0 1px var(--track); }
   .cell.read { background: var(--map-read); }
   .cell.found { background: var(--brand); }
   .cell.error { background: var(--error); }

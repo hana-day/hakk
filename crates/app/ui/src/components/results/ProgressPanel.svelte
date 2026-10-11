@@ -11,6 +11,9 @@
     progress.totalBytes > 0 ? Math.floor((progress.bytesRead / progress.totalBytes) * 100) : 0,
   );
   const carving = $derived(progress.stage === 'carving');
+  // Retrying unreadable areas can outlast the main pass on a failing disk, so it gets its
+  // own wording instead of sitting at 100 % under "scanning".
+  const retry = $derived(progress.stage === 'retrying' ? progress.retry : null);
   const paused = $derived(progress.state === 'paused');
   const minutes = $derived(
     progress.remainingSeconds === null ? null : Math.round(progress.remainingSeconds / 60),
@@ -21,7 +24,12 @@
   <div class="top">
     <div class="stage">
       <span class="pre">
-        {#if carving}
+        {#if retry}
+          {t('progress.stageAfter', {
+            done: t('progress.carvingDone'),
+            stage: t('progress.retryPass', { pass: retry.pass, passes: retry.passes }),
+          })}
+        {:else if carving}
           {t('progress.stageAfter', {
             done: t('progress.fileSystemDone'),
             stage: t('progress.stageOf', { n: 2, total: 2 }),
@@ -31,17 +39,27 @@
         {/if}
       </span>
       <span class="title">
-        {paused ? t('progress.paused') : carving ? t('progress.carving') : t('progress.fileSystem')}
+        {paused
+          ? t('progress.paused')
+          : retry
+            ? t('progress.retrying')
+            : carving
+              ? t('progress.carving')
+              : t('progress.fileSystem')}
       </span>
     </div>
     <div class="stats">
-      <span class="num">
-        {t('progress.bytes', {
-          read: formatBytes(progress.bytesRead),
-          total: formatBytes(progress.totalBytes),
-        })}
-      </span>
-      {#if !paused}
+      {#if retry}
+        <span><Msg key="progress.retryLeft" params={{ bytes: formatBytes(retry.bytesLeft) }} /></span>
+      {:else}
+        <span class="num">
+          {t('progress.bytes', {
+            read: formatBytes(progress.bytesRead),
+            total: formatBytes(progress.totalBytes),
+          })}
+        </span>
+      {/if}
+      {#if !paused && !retry}
         <span>
           {#if minutes === null}{t('progress.remainingUnknown')}
           {:else if minutes < 1}{t('progress.remainingUnderMinute')}

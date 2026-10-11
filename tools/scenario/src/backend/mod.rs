@@ -123,7 +123,7 @@ pub fn native(format: Format) -> Result<Box<dyn Backend>> {
 
 /// Writes an MBR with one partition covering the rest of the disk.
 /// Reference: the classic MBR layout (entries at 446, signature 0x55AA at 510).
-fn write_mbr(image: &Path, f: &Format) -> Result<()> {
+pub(crate) fn write_mbr(image: &Path, f: &Format) -> Result<()> {
     let (start, len) = f.volume();
     let mut mbr = [0u8; 512];
     let entry = [

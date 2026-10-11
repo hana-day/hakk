@@ -45,6 +45,10 @@ export const ja = {
     stageOf: '段階 {n} / {total}',
     stageAfter: '{done}　→　{stage}',
     fileSystemDone: 'ファイル情報の解析　完了 ✓',
+    carvingDone: 'ディスク全体のスキャン　完了 ✓',
+    retrying: '読み取れなかった部分をもう一度読んでいます',
+    retryPass: '{pass} 回目 / {passes} 回',
+    retryLeft: '残り {bytes}',
     fileSystem: 'ファイル情報を解析中',
     carving: 'ディスク全体をスキャン中',
     paused: '一時停止しています',
@@ -58,6 +62,7 @@ export const ja = {
   },
   diskMap: {
     label: 'ディスクマップ：先頭から{percent}%まで読み取り済み',
+    skipped: '対象外',
     unread: '未読み取り',
     read: '読み取り済み',
     found: 'ファイルを発見',

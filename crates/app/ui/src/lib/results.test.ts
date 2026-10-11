@@ -18,7 +18,7 @@ function file(over: Partial<FoundFile>): FoundFile {
     size: 1000,
     date: { local: '2025-08-14T10:00:00', source: 'capture' },
     durationSeconds: null,
-    confidence: 'high',
+    confidence: null,
     status: 'recoverable',
     hidden: null,
     repair: null,

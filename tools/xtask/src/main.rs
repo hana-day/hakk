@@ -7,6 +7,7 @@
 //!
 //! Recovery tools:
 //! - `naive`: our minimal baseline carver (`carver::naive`)
+//! - `hakk`: the structure-aware carver (`carver::scan`)
 //! - `fs`: file system analysis (`crates/fs`; see `fs_tool`)
 //! - `photorec`: run as an external command if `photorec` is on PATH
 
@@ -95,6 +96,13 @@ fn bench(args: &[String]) -> Result<()> {
         let elapsed = started.elapsed().as_secs_f64();
         reports.push(evaluate(&bin, &manifest, &out, "naive", elapsed, &dir)?);
 
+        // The structure-aware carver.
+        let out = dir.join("hakk");
+        let started = Instant::now();
+        hakk(&image, &out)?;
+        let elapsed = started.elapsed().as_secs_f64();
+        reports.push(evaluate(&bin, &manifest, &out, "hakk", elapsed, &dir)?);
+
         reports.push(fs_tool::run(&bin, &image, &manifest, &dir)?);
 
         if let Some(photorec) = &photorec {
@@ -134,6 +142,28 @@ fn bench(args: &[String]) -> Result<()> {
 }
 
 /// Recovers with the minimal carver, writing files to `out`.
+/// Recovers with the structure-aware carver, writing complete files and the readable part
+/// of broken ones to `out`.
+fn hakk(image: &Path, out: &Path) -> Result<()> {
+    fs::create_dir_all(out)?;
+    let src = ImageFile::open(image)?;
+    for f in carver::scan::scan(&src, &carver::scan::Options::default()) {
+        if f.len == 0 {
+            continue;
+        }
+        let tag = match f.status {
+            carver::Status::Complete => "",
+            carver::Status::Corrupt { .. } => "-broken",
+            carver::Status::Truncated => "-truncated",
+        };
+        fs::write(
+            out.join(format!("f{:010}{tag}.{}", f.offset, f.kind.extension())),
+            f.read(&src),
+        )?;
+    }
+    Ok(())
+}
+
 fn naive(image: &Path, out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
     let src = ImageFile::open(image)?;
