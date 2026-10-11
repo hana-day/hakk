@@ -19,9 +19,11 @@ use crate::scenario::FsKind;
 pub struct Vhd(pub Format);
 
 impl Vhd {
-    /// `Format-Volume` arguments for the file system and cluster size. Windows picks
-    /// FAT12 or FAT16 itself for "FAT", depending on the volume size.
-    fn format_args(&self) -> Result<String> {
+    /// A `Format-Volume` command for `target` (e.g. `-DriveLetter E`). Windows picks FAT12
+    /// or FAT16 itself for "FAT" and rejects cluster sizes that do not fit its choice, so a
+    /// requested cluster size falls back to the default (the manifest records what was
+    /// actually made).
+    fn format_cmd(&self, target: &str) -> Result<String> {
         let f = &self.0;
         let fs = match f.fs {
             FsKind::Exfat => "exFAT",
@@ -29,14 +31,16 @@ impl Vhd {
             FsKind::Fat12 | FsKind::Fat16 => "FAT",
             FsKind::None => bail!("no OS driver for disks without a file system"),
         };
-        let mut args = format!(
-            "-FileSystem {fs} -NewFileSystemLabel {} -Force -Confirm:$false",
+        let base = format!(
+            "Format-Volume {target} -FileSystem {fs} -NewFileSystemLabel {} -Force -Confirm:$false",
             quote(Path::new(&f.label))
         );
-        if let Some(c) = f.cluster {
-            args.push_str(&format!(" -AllocationUnitSize {c}"));
-        }
-        Ok(args)
+        Ok(match f.cluster {
+            Some(c) => format!(
+                "try {{ {base} -AllocationUnitSize {c} | Out-Null }} catch {{ {base} | Out-Null }}"
+            ),
+            None => format!("{base} | Out-Null"),
+        })
     }
 }
 
@@ -71,36 +75,29 @@ impl Backend for Vhd {
             // New-Partition only accepts aligned offsets, so write the MBR ourselves (a
             // fixed VHD starts with the raw disk) and format the existing partition.
             super::write_mbr(&image, &self.0)?;
-            let m = self.mount(&image)?;
-            let result = powershell(&format!(
-                "Format-Volume -DriveLetter {letter} {args} | Out-Null",
-                letter = m.root().to_string_lossy().chars().next().unwrap_or('Z'),
-                args = self.format_args()?,
-            ));
-            m.unmount()?;
-            result?;
+            // The partition is unformatted, so formatting it is the same as a quick format.
+            self.format(&image)?;
         } else {
             powershell(&format!(
                 "$d = Mount-DiskImage -ImagePath {img} -PassThru | Get-Disk
                  Initialize-Disk -Number $d.Number -PartitionStyle MBR
                  $p = New-Partition -DiskNumber $d.Number -UseMaximumSize -AssignDriveLetter
-                 Format-Volume -Partition $p {args} | Out-Null
+                 {cmd}
                  Dismount-DiskImage -ImagePath {img} | Out-Null",
                 img = quote(&image),
-                args = self.format_args()?,
+                cmd = self.format_cmd("-Partition $p")?,
             ))?;
         }
         Ok(image)
     }
 
     fn format(&self, image: &Path) -> Result<()> {
-        let args = self.format_args()?;
         let m = self.mount(image)?;
         // Quick format by default (data areas are kept unless -Full is given).
-        let result = powershell(&format!(
-            "Format-Volume -DriveLetter {letter} {args} | Out-Null",
-            letter = m.root().to_string_lossy().chars().next().unwrap_or('Z'),
-        ));
+        let letter = m.root().to_string_lossy().chars().next().unwrap_or('Z');
+        let result = self
+            .format_cmd(&format!("-DriveLetter {letter}"))
+            .and_then(|cmd| powershell(&cmd));
         m.unmount()?;
         result.map(drop)
     }
