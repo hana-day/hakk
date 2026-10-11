@@ -8,7 +8,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind};
+use crate::{Found, Kind, Status};
 
 const SOI: [u8; 3] = [0xFF, 0xD8, 0xFF];
 const EOI: [u8; 2] = [0xFF, 0xD9];
@@ -42,6 +42,7 @@ pub fn scan(src: &impl BlockSource, max_len: u64) -> Vec<Found> {
                     offset: at,
                     len,
                     kind: Kind::Jpeg,
+                    status: Status::Complete,
                 });
                 skip_until = at + len;
             }
@@ -104,12 +105,14 @@ mod tests {
                 Found {
                     offset: 1024,
                     len: 3000,
-                    kind: Kind::Jpeg
+                    kind: Kind::Jpeg,
+                    status: Status::Complete,
                 },
                 Found {
                     offset: 8192,
                     len: 5000,
-                    kind: Kind::Jpeg
+                    kind: Kind::Jpeg,
+                    status: Status::Complete,
                 },
             ]
         );
