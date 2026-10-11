@@ -391,3 +391,32 @@ fn carved_files_inside_a_complete_one_are_folded_into_it() {
     assert_eq!(ix.files(&Query::default()).unwrap().len(), 4);
     assert_eq!(ix.merge_duplicates().unwrap(), []);
 }
+
+#[test]
+fn two_writers_on_separate_connections_do_not_fail() {
+    // The scan commits checkpoints while the GUI side merges duplicates.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scan.hakk");
+    let mut ix = Index::open(&path).unwrap();
+    ix.begin_scan(&source(), &[0..1 << 30]).unwrap();
+    let scanner = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let mut ix = Index::open(&path).unwrap();
+            for i in 0..300u64 {
+                let progress = ScanProgress {
+                    done: vec![0..(i + 1) * 4096],
+                    ..ScanProgress::default()
+                };
+                ix.commit(&[NewFile::carved(FileKind::Jpeg, i * 4096, 100)], &progress)
+                    .unwrap();
+            }
+        })
+    };
+    for _ in 0..300 {
+        ix.merge_duplicates().unwrap();
+        ix.files(&Query::default()).unwrap();
+    }
+    scanner.join().unwrap();
+    assert_eq!(ix.files(&Query::default()).unwrap().len(), 300);
+}

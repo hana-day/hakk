@@ -106,7 +106,7 @@ impl Index {
     /// Starts a new scan: records the source and the planned ranges, and clears coverage
     /// left by a previous scan. Files found earlier are kept.
     pub fn begin_scan(&mut self, source: &SourceInfo, planned: &[Range<u64>]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = write(&mut self.conn)?;
         set_meta(&tx, "source_len", Value::Integer(to_i64(source.len)?))?;
         set_meta(
             &tx,
@@ -174,7 +174,7 @@ impl Index {
     /// Atomically stores newly found files together with the scan progress.
     /// Returns how many files were new (re-reported files are ignored).
     pub fn commit(&mut self, files: &[NewFile], progress: &ScanProgress) -> Result<usize> {
-        let tx = self.conn.transaction()?;
+        let tx = write(&mut self.conn)?;
         let added = insert_files(&tx, &mut self.ids, files)?;
         write_progress(&tx, progress)?;
         match tx.commit() {
@@ -191,7 +191,7 @@ impl Index {
 
     /// Stores files. Returns how many were new (re-reported files are ignored).
     pub fn insert(&mut self, files: &[NewFile]) -> Result<usize> {
-        let tx = self.conn.transaction()?;
+        let tx = write(&mut self.conn)?;
         let added = insert_files(&tx, &mut self.ids, files)?;
         match tx.commit() {
             Ok(()) => Ok(added),
@@ -380,7 +380,7 @@ impl Index {
     /// information `into` lacks is taken from `from`. Records already merged into `from`
     /// are moved to `into`.
     pub fn merge(&mut self, from: i64, into: i64) -> Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = write(&mut self.conn)?;
         merge_in(&tx, from, into, true)?;
         tx.commit()?;
         Ok(())
@@ -397,7 +397,7 @@ impl Index {
     ///    result is part of it (e.g. a JPEG frame inside a video, which parallel carving
     ///    cannot always skip): it is merged into the container, without copying anything.
     pub fn merge_duplicates(&mut self) -> Result<Vec<(i64, i64)>> {
-        let tx = self.conn.transaction()?;
+        let tx = write(&mut self.conn)?;
         let pairs: Vec<(i64, String, i64, String)> = {
             let mut stmt = tx.prepare(
                 "SELECT c.id, c.kind, f.id, f.kind FROM files c \
@@ -460,6 +460,14 @@ impl Index {
         tx.commit()?;
         Ok(merged)
     }
+}
+
+/// Starts a write transaction holding the write lock from the start. Another
+/// connection (e.g. the GUI side merging duplicates while the scan commits) then waits
+/// for it through the busy timeout. A deferred transaction would read first and fail
+/// at once with "database is locked" if the other writer committed in between.
+fn write(conn: &mut Connection) -> Result<Transaction<'_>> {
+    Ok(conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
 }
 
 /// Merges `from` into `into`; with `copy_preview`, `into` also takes the preview
