@@ -107,6 +107,21 @@ pub enum ScanStage {
     FileSystem,
     /// Reading the whole disk and carving files by their content.
     Carving,
+    /// Reading areas that failed again, in several passes. On a failing disk this can take
+    /// much longer than the main pass, so it is reported as its own stage.
+    Retrying,
+}
+
+/// Progress of the retry stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryProgress {
+    /// Current pass, starting at 1.
+    pub pass: u32,
+    pub passes: u32,
+    /// Bytes still unreadable.
+    #[ts(type = "number")]
+    pub bytes_left: u64,
 }
 
 /// Run state of a scan.
@@ -165,6 +180,8 @@ pub struct ScanProgress {
     pub photos_found: u32,
     pub videos_found: u32,
     pub read_errors: u32,
+    /// Set during the retry stage.
+    pub retry: Option<RetryProgress>,
     pub disk_map: DiskMap,
 }
 

@@ -20,7 +20,7 @@ use hakk_protocol::{
     Destination, DestinationId, DiskMap, Drive, DriveId, FileId, FileKind, FileMerge, FileStatus,
     FileUpdate, FilesFound, FilesMerged, FilesUpdated, FoundFile, HelperError, HelperEvent,
     MapCell, RecoveryId, RecoveryProgress, RecoveryReport, RecoveryRequest, RepairReport,
-    RepairRequest, ScanId, ScanProgress, ScanStage, ScanState, ScanSummary,
+    RepairRequest, RetryProgress, ScanId, ScanProgress, ScanStage, ScanState, ScanSummary,
 };
 
 use self::dataset::{MockDrive, PlannedFile, Reveal, Rng};
@@ -34,6 +34,9 @@ const FILE_SYSTEM_STAGE_SHARE: f64 = 0.08;
 const FILE_SYSTEM_STAGE_BYTES_SHARE: f64 = 0.006;
 /// Cells that fail to read, as in the mock screens.
 const ERROR_CELLS: [u32; 2] = [120, 121];
+/// Wall-clock length of each pass of the retry stage, and the number of passes.
+const RETRY_PASS_SECONDS: f64 = 1.5;
+const RETRY_PASSES: u32 = 2;
 /// Wall-clock speed of a simulated recovery.
 const RECOVERY_BYTES_PER_SECOND: f64 = 40_000_000.0;
 const RECOVERY_SECONDS: (f64, f64) = (3.0, 20.0);
@@ -147,6 +150,7 @@ struct Scan {
     user_paused: bool,
     ended: Option<ScanState>,
     stage: ScanStage,
+    retry: Option<RetryProgress>,
     /// Wall-clock seconds spent reading (excludes pauses).
     active: f64,
     bytes_read: u64,
@@ -219,6 +223,7 @@ impl Sim {
             user_paused: false,
             ended: None,
             stage: ScanStage::FileSystem,
+            retry: None,
             active: 0.0,
             bytes_read: 0,
             bytes_per_second: mock.bytes_per_second,
@@ -450,6 +455,20 @@ impl Sim {
                         scan.error_cells.push(cell);
                     }
                 }
+                // After the main pass, re-read what failed. Half of it comes back.
+                let retry_elapsed = scan.active - scan_seconds;
+                if retry_elapsed >= 0.0 && !scan.error_cells.is_empty() {
+                    scan.stage = ScanStage::Retrying;
+                    let pass = (retry_elapsed / RETRY_PASS_SECONDS) as u32 + 1;
+                    let done =
+                        (retry_elapsed / (RETRY_PASS_SECONDS * f64::from(RETRY_PASSES))).min(1.0);
+                    let bad = scan.error_cells.len() as u64 * (total / u64::from(MAP_CELLS));
+                    scan.retry = Some(RetryProgress {
+                        pass: pass.min(RETRY_PASSES),
+                        passes: RETRY_PASSES,
+                        bytes_left: bad - (bad as f64 * done * 0.5) as u64,
+                    });
+                }
             }
         }
 
@@ -470,7 +489,13 @@ impl Sim {
                 merges.push(merge);
             }
         }
-        let finished = reading && scan.bytes_read >= total;
+        let retry_seconds = if scan.error_cells.is_empty() {
+            0.0
+        } else {
+            RETRY_PASS_SECONDS * f64::from(RETRY_PASSES)
+        };
+        let finished =
+            reading && scan.bytes_read >= total && scan.active >= scan_seconds + retry_seconds;
         if finished {
             // Settle every pending result so the summary has final numbers.
             while let Some((_, id)) = scan.verifications.pop_front() {
@@ -591,12 +616,15 @@ impl Sim {
             photos_found: visible(FileKind::Photo),
             videos_found: visible(FileKind::Video),
             read_errors: scan.error_cells.len() as u32,
+            retry: scan.retry.filter(|_| scan.stage == ScanStage::Retrying),
             disk_map: DiskMap {
                 cells,
-                current: scan
-                    .ended
-                    .is_none()
-                    .then(|| cell_of(scan.bytes_read, total)),
+                // While retrying, the head is back over the failed areas.
+                current: match (scan.ended, scan.stage) {
+                    (Some(_), _) => None,
+                    (None, ScanStage::Retrying) => scan.error_cells.first().copied(),
+                    (None, _) => Some(cell_of(scan.bytes_read, total)),
+                },
             },
         }));
     }
@@ -717,7 +745,7 @@ mod tests {
     fn full_scan_reports_every_file_and_a_summary() {
         let (mut sim, events) = sim();
         let id = sim.start_scan(&sd()).unwrap();
-        run(&mut sim, 11.0);
+        run(&mut sim, 14.0);
         let events = events.lock().unwrap();
         let summary = events
             .iter()
@@ -744,6 +772,10 @@ mod tests {
             _ => None,
         });
         let last = last.expect("progress");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            HelperEvent::ScanProgress(p) if p.stage == ScanStage::Retrying && p.retry.is_some()
+        )));
         assert_eq!(last.state, ScanState::Finished);
         assert_eq!(last.bytes_read, last.total_bytes);
         assert!(last.disk_map.cells.iter().all(|c| *c != MapCell::Unread));
@@ -811,7 +843,7 @@ mod tests {
     fn repair_marks_the_file_repaired() {
         let (mut sim, events) = sim();
         let scan_id = sim.start_scan(&sd()).unwrap();
-        run(&mut sim, 11.0);
+        run(&mut sim, 14.0);
         let (id, method) = sim
             .scan
             .as_ref()

@@ -3,4 +3,4 @@
 /**
  * Phase of a scan. Scans run the phases in this order.
  */
-export type ScanStage = "fileSystem" | "carving";
+export type ScanStage = "fileSystem" | "carving" | "retrying";
