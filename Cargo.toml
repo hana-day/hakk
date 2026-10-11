@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/blocksource", "crates/carver", "crates/index", "crates/scan", "tools/scenario", "tools/eval", "tools/xtask"]
+members = ["crates/blocksource", "crates/carver", "crates/fs", "crates/index", "crates/scan", "crates/protocol", "crates/app", "tools/scenario", "tools/eval", "tools/xtask"]
 
 [workspace.package]
 version = "0.0.0"

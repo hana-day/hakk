@@ -1,0 +1,138 @@
+/* Design tokens and shared styles. Colors follow the mock screens. */
+:root {
+  --brand: #0e6e68;
+  --brand-hover: #09504c;
+  --brand-soft: #e3f1ef;
+  --brand-text: #0b5c57;
+  --brand-row: #f3f9f8;
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --text: #15181d;
+  --text-2: #3a404c;
+  --text-3: #5a6170;
+  --line: #dde1e6;
+  --line-strong: #c8cdd5;
+  --line-soft: #eef0f3;
+  --track: #e4e7eb;
+  --neutral-soft: #eef0f3;
+  --neutral-text: #4a505c;
+  --warn: #8a4300;
+  --warn-strong: #6b3500;
+  --warn-bar: #9a4b00;
+  --warn-soft: #fdf0e1;
+  --warn-line: #f1d3ae;
+  --error: #b42318;
+  --map-read: #b9d9d5;
+  --font: 'Noto Sans JP Variable', 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html, body { margin: 0; height: 100%; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-feature-settings: 'palt';
+}
+
+button, input, select { font: inherit; color: inherit; }
+
+a { color: var(--brand); }
+a:hover { color: var(--brand-hover); }
+
+.num { font-family: var(--mono); font-weight: 500; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Buttons */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 28px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.btn-primary:hover:not(:disabled) { background: var(--brand-hover); }
+.btn-primary:disabled { background: #9fb9b6; cursor: default; }
+
+.btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  font-size: 14px;
+  cursor: pointer;
+}
+.btn-secondary:hover:not(:disabled) { background: var(--bg); }
+
+.btn-quiet {
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  font-size: 14px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.btn-quiet:hover { background: var(--bg); }
+
+.btn-link {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--brand);
+  font-size: 14px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+:focus-visible { outline: 3px solid #7fc4bd; outline-offset: 2px; }
+
+/* Status badges */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.badge-ok { background: var(--brand-soft); color: var(--brand-text); }
+.badge-warn { background: var(--warn-soft); color: var(--warn); }
+.badge-neutral { background: var(--neutral-soft); color: var(--neutral-text); }
+
+/* Small stat tiles */
+.stat {
+  padding: 10px 16px;
+  border-radius: 10px;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.stat-label { font-size: 12px; color: var(--text-3); }

@@ -1,0 +1,87 @@
+# Carving: device-shaped files placed directly on a disk without a file system, in the six
+# layouts of the NIST CFReDS carving images. Identical on every OS.
+name = "carving"
+seed = 5
+size = "192MiB"
+fs = "none"
+
+# L0: each file in one piece.
+[[steps]]
+op = "place"
+kind = "jpeg"
+profile = "canon-compact"
+count = 6
+min_size = "600KiB"
+max_size = "1MiB"
+layout = "contiguous"
+gap = ["16KiB", "1MiB"]
+
+# L1: fragments in order, cut on 32 KiB cluster boundaries.
+[[steps]]
+op = "place"
+kind = "jpeg"
+profile = "iphone"
+count = 4
+min_size = "1MiB"
+max_size = "3MiB"
+layout = "sequential"
+fragments = [2, 4]
+align = "32KiB"
+
+# L2: fragments out of order.
+[[steps]]
+op = "place"
+kind = "jpeg"
+profile = "samsung-s3mini"
+count = 4
+min_size = "1MiB"
+max_size = "2MiB"
+layout = "shuffled"
+fragments = [2, 3]
+align = "32KiB"
+
+# L3: one fragment missing.
+[[steps]]
+op = "place"
+kind = "jpeg"
+profile = "lenovo"
+count = 4
+min_size = "1MiB"
+max_size = "2MiB"
+layout = "missing"
+fragments = [3, 4]
+align = "32KiB"
+
+# L4: a whole photo between the two halves of another.
+[[steps]]
+op = "place"
+kind = "jpeg"
+profile = "oneplus"
+count = 4
+min_size = "1MiB"
+max_size = "2MiB"
+layout = "nested"
+align = "32KiB"
+
+# L5: two videos whose fragments alternate.
+[[steps]]
+op = "place"
+kind = "mp4"
+profile = "android-moov-last"
+count = 2
+min_size = "6MiB"
+max_size = "10MiB"
+layout = "braided"
+fragments = [3, 4]
+align = "32KiB"
+
+# Constant filler (like CFReDS's 0xB9) around contiguous videos.
+[[steps]]
+op = "place"
+kind = "mp4"
+profile = "iphone"
+count = 3
+min_size = "4MiB"
+max_size = "8MiB"
+layout = "contiguous"
+fill = "0xB9"

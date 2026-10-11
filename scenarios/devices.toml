@@ -1,0 +1,106 @@
+# Devices: photos and videos shaped like real cameras and phones (see profiles.toml),
+# half of them deleted, then a few more shots on top.
+name = "devices"
+seed = 4
+size = "256MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "canon-compact"
+count = 12
+min_size = "600KiB"
+max_size = "1MiB"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "iphone"
+count = 8
+min_size = "1MiB"
+max_size = "3MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+profile = "iphone"
+count = 2
+min_size = "8MiB"
+max_size = "16MiB"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "samsung-s3mini"
+count = 4
+min_size = "1MiB"
+max_size = "3MiB"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "lg"
+count = 4
+min_size = "1MiB"
+max_size = "3MiB"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "lenovo"
+count = 3
+min_size = "1MiB"
+max_size = "3MiB"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "oneplus"
+count = 3
+min_size = "1MiB"
+max_size = "3MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+profile = "android-moov-first"
+count = 2
+min_size = "8MiB"
+max_size = "16MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+profile = "android-moov-last"
+count = 2
+min_size = "8MiB"
+max_size = "16MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+profile = "lumia"
+count = 1
+min_size = "4MiB"
+max_size = "8MiB"
+
+[[steps]]
+op = "write"
+kind = "mp4"
+profile = "xperia"
+count = 1
+min_size = "4MiB"
+max_size = "8MiB"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "huawei"
+count = 4
+min_size = "1MiB"
+max_size = "2MiB"

@@ -1,0 +1,17 @@
+[package]
+name = "fs"
+description = "File system analysis: lists live and deleted files (exFAT, FAT12/16/32)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blocksource = { path = "../blocksource" }
+
+[dev-dependencies]
+proptest = "1"
+sha1_smol = "1"
+
+[lints]
+workspace = true

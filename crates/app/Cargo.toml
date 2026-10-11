@@ -1,0 +1,25 @@
+[package]
+name = "hakk-app"
+description = "Desktop GUI (Tauri). Runs with normal privileges and talks to the privileged helper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hakk"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.1", features = [] }
+
+[dependencies]
+hakk-protocol = { path = "../protocol" }
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = { version = "2.12.2", features = [] }
+
+[dev-dependencies]
+serde_json = "1.0.151"
+
+[lints]
+workspace = true

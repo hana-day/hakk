@@ -21,6 +21,9 @@ pub struct Manifest {
     pub image_size: u64,
     /// Where the file system starts (the first partition if there is a partition table).
     pub partition_offset: u64,
+    /// File system type found in the volume boot sector (Windows picks FAT12 or FAT16
+    /// itself, so this may differ from the requested `fs`).
+    pub detected_fs: Option<String>,
     /// Cluster size of the file system (read from its boot sector).
     pub cluster_size: Option<u64>,
     /// Where the image was built (recorded because layout depends on the OS driver).
@@ -41,6 +44,9 @@ pub struct FileEntry {
     /// Path within the volume (`/`-separated).
     pub path: String,
     pub kind: ContentKind,
+    /// Device profile the file was generated with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub size: u64,
     pub sha256: String,
     /// Index of the step that wrote the file.

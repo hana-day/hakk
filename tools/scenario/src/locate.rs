@@ -86,7 +86,12 @@ impl<'a> Index<'a> {
                     next.and_then(|n| n.checked_sub(BLOCK as u64)),
                 ];
                 let c = cands.get(i).map(Vec::as_slice).unwrap_or_default();
-                if let Some(found) = want.into_iter().flatten().find(|w| c.contains(w))
+                // Zero blocks are not indexed: accept them where the image is zero too.
+                let block = data.get(i * BLOCK..(i + 1) * BLOCK).unwrap_or_default();
+                let zero = block.iter().all(|&b| b == 0);
+                let fits =
+                    |w: &u64| c.contains(w) || (zero && self.block_at(*w, BLOCK) == Some(block));
+                if let Some(found) = want.into_iter().flatten().find(fits)
                     && let Some(slot) = pos.get_mut(i)
                 {
                     *slot = Some(found);
@@ -234,6 +239,24 @@ mod tests {
         let idx = Index::new(&img);
         assert_eq!(idx.locate(&a).unwrap()[0].image_offset, 4096);
         assert_eq!(idx.locate(&b).unwrap()[0].image_offset, 20480);
+    }
+
+    /// Runs of zeros inside a file (e.g. a reserved `free` box) follow their neighbors.
+    #[test]
+    fn zero_runs_resolved_by_neighbors() {
+        let mut data = Rng::new(7).bytes(4096);
+        data.extend(vec![0u8; 8192]);
+        data.extend(Rng::new(8).bytes(4096));
+        let img = image_with(&[(&data, &[8192, 12288, 16384, 20480])], 64 * 1024);
+        let ext = Index::new(&img).locate(&data).unwrap();
+        assert_eq!(
+            ext,
+            [Extent {
+                file_offset: 0,
+                image_offset: 8192,
+                len: 16384
+            }]
+        );
     }
 
     #[test]

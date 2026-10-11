@@ -7,20 +7,43 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use super::{Backend, Mounted, run};
+use super::{Backend, Format, Mounted, run};
 use crate::scenario::FsKind;
 
 /// Attaches images as disks with `hdiutil`.
-pub struct Hdiutil;
+pub struct Hdiutil(pub Format);
 
 /// Attach as a raw image without a partition table.
 const RAW: [&str; 2] = ["-imagekey", "diskimage-class=CRawDiskImage"];
 
 impl Backend for Hdiutil {
-    fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()> {
-        let FsKind::Exfat = fs;
+    fn spec(&self) -> &Format {
+        &self.0
+    }
+
+    fn format(&self, image: &Path) -> Result<()> {
+        let f = &self.0;
         let dev = attach_nomount(image)?;
-        let result = run(Command::new("newfs_exfat").args(["-v", label]).arg(&dev));
+        // With a partition table, hdiutil exposes the partition as the first slice.
+        let target = if f.partition_start.is_some() {
+            format!("{dev}s1")
+        } else {
+            dev.clone()
+        };
+        let mut cmd = match f.fs {
+            FsKind::Exfat => Command::new("newfs_exfat"),
+            FsKind::Fat12 | FsKind::Fat16 | FsKind::Fat32 => {
+                let mut c = Command::new("newfs_msdos");
+                c.args(["-F", fat_bits(f.fs)]);
+                c
+            }
+            FsKind::None => bail!("no OS driver for disks without a file system"),
+        };
+        cmd.args(["-v", &f.label]);
+        if let Some(spc) = f.sectors_per_cluster() {
+            cmd.args(["-c", &spc.to_string()]);
+        }
+        let result = run(cmd.arg(&target));
         detach(&dev)?;
         result.map(drop)
     }
@@ -64,6 +87,14 @@ impl Mounted for Volume {
 
     fn unmount(self: Box<Self>) -> Result<()> {
         detach(&self.dev)
+    }
+}
+
+fn fat_bits(fs: FsKind) -> &'static str {
+    match fs {
+        FsKind::Fat12 => "12",
+        FsKind::Fat16 => "16",
+        _ => "32",
     }
 }
 
