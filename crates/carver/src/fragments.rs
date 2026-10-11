@@ -42,6 +42,9 @@ pub struct Options {
     pub back: u64,
     /// How far from the end of a fragment (either way) to look for the next one.
     pub reach: u64,
+    /// Bytes decoded past a boundary to judge a candidate's seam first; candidates with a
+    /// rough seam are dropped before decoding further.
+    pub glance: u64,
     /// Bytes decoded past a boundary to judge a candidate.
     pub window: u64,
     /// Fewest bytes of clean decoding for a candidate to count at all.
@@ -59,14 +62,15 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             grid: 4096,
-            back: 64 << 10,
+            back: 16 << 10,
             reach: 16 << 20,
+            glance: 2 << 10,
             window: 32 << 10,
             min_progress: 2048,
             max_seam: 3.0,
             good_seam: 1.5,
             max_fragments: 8,
-            budget: 20_000,
+            budget: 8_000,
         }
     }
 }
@@ -95,7 +99,11 @@ struct Spliced<'r, 'a, S: BlockSource + ?Sized> {
 
 impl<S: BlockSource + ?Sized> Spliced<'_, '_, S> {
     fn map(&self, v: u64) -> Option<u64> {
-        let seg = self.segs.iter().rev().find(|s| s.v <= v)?;
+        // Nearly every read lands in the last piece; check it first.
+        let seg = match self.segs.last() {
+            Some(last) if last.v <= v => last,
+            _ => self.segs.iter().rev().find(|s| s.v <= v)?,
+        };
         seg.src.checked_add(v - seg.v)
     }
 }
@@ -307,7 +315,30 @@ impl Search<'_> {
                         r: &mut *r,
                         segs: trial,
                     };
+
+                    // A first glance: is the seam smooth at all?
                     let mut dcs = Vec::new();
+                    let glance = Some(b + opts.glance);
+                    let first = jpeg::decode(
+                        self.plan,
+                        &mut sp,
+                        from,
+                        self.limit,
+                        glance,
+                        None,
+                        Some(&mut dcs),
+                    );
+                    if let Outcome::Fail(Stop::Corrupt(at)) = first
+                        && at.saturating_sub(b) < opts.min_progress
+                    {
+                        continue;
+                    }
+                    if seam(&dcs, &base, cols, typical).is_some_and(|x| x > opts.max_seam) {
+                        continue;
+                    }
+
+                    // Then the whole window.
+                    dcs.clear();
                     let cap = Some(b + opts.window);
                     let outcome = jpeg::decode(
                         self.plan,

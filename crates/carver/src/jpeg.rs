@@ -112,16 +112,25 @@ struct Huffman {
     valptr: [i32; 17],
     mincode: [i32; 17],
     values: Vec<u8>,
+    /// Lookahead on the next `LOOKAHEAD` bits: `(code length, symbol)`, length 0 if the
+    /// code is longer.
+    fast: Vec<(u8, u8)>,
 }
+
+/// Bits decoded by one table lookup.
+const LOOKAHEAD: u32 = 9;
 
 impl Huffman {
     /// Builds the decoding table from BITS (counts per length) and HUFFVAL (C.2, F.15).
+    // Code lengths are at most 16, so the casts below cannot truncate.
+    #[allow(clippy::cast_possible_truncation)]
     fn new(counts: &[u8; 16], values: Vec<u8>) -> Option<Self> {
         let mut t = Self {
             maxcode: [-1; 17],
             valptr: [0; 17],
             mincode: [0; 17],
             values,
+            fast: vec![(0, 0); 1 << LOOKAHEAD],
         };
         let mut code: i32 = 0;
         let mut k: i32 = 0;
@@ -140,7 +149,29 @@ impl Huffman {
             }
             code <<= 1;
         }
-        (k as usize <= t.values.len()).then_some(t)
+        if k as usize > t.values.len() {
+            return None;
+        }
+        // Fill the lookahead: every bit pattern starting with a short code maps to it.
+        let mut idx = 0usize;
+        let mut code = 0u32;
+        for (i, &n) in counts.iter().enumerate() {
+            let len = (i + 1) as u32;
+            for _ in 0..n {
+                if len <= LOOKAHEAD {
+                    let sym = t.values.get(idx).copied().unwrap_or(0);
+                    let shift = LOOKAHEAD - len;
+                    let first = (code << shift) as usize;
+                    for e in t.fast.iter_mut().skip(first).take(1 << shift) {
+                        *e = (len as u8, sym);
+                    }
+                }
+                idx += 1;
+                code += 1;
+            }
+            code <<= 1;
+        }
+        Some(t)
     }
 }
 
@@ -489,7 +520,7 @@ pub(crate) struct Plan {
 pub(crate) struct Snapshot {
     /// Offset of the next byte to load; every byte before it has been consumed.
     pub pos: u64,
-    acc: u32,
+    acc: u64,
     count: u32,
     pub mcu: u64,
     rst: u8,
@@ -537,6 +568,7 @@ pub(crate) fn decode<T: Stream + ?Sized>(
         acc: from.acc,
         count: from.count,
         limit,
+        stop: None,
     };
     let mut rst = from.rst;
     let mut pred = from.pred;
@@ -585,7 +617,13 @@ pub(crate) fn decode<T: Stream + ?Sized>(
             return Outcome::Fail(stop);
         }
     }
-    // After the last MCU the scan ends at the next marker, possibly after fill bytes.
+    // After the last MCU only padding bits of the last byte may remain; then the scan ends
+    // at the next marker, possibly after fill bytes.
+    if bits.count >= 8 {
+        return Outcome::Fail(Stop::Corrupt(
+            bits.pos.saturating_sub(u64::from(bits.count / 8)),
+        ));
+    }
     let mut pos = bits.pos;
     loop {
         match (s.byte(pos), s.byte(pos + 1)) {
@@ -598,35 +636,77 @@ pub(crate) fn decode<T: Stream + ?Sized>(
 }
 
 /// Bit reader over entropy-coded data with byte stuffing (F.1.2.3: `FF 00` is `FF`).
+///
+/// Up to 64 bits are buffered, left-aligned in `acc`. Loading stops at a marker (or at the
+/// end of the data), and asking for bits beyond it is an error at that point.
 struct Bits {
-    /// Offset of the next byte to load.
+    /// Offset of the next byte to load. Every byte before it is in `acc` or consumed.
     pos: u64,
-    acc: u32,
+    acc: u64,
     count: u32,
     limit: u64,
+    /// Why loading stopped, if it did.
+    stop: Option<Stop>,
 }
 
+// The buffer is shifted right by at least 48 bits before narrowing, so the casts in this
+// impl cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
 impl Bits {
-    fn bit<T: Stream + ?Sized>(&mut self, s: &mut T) -> Result<u32, Stop> {
-        if self.count == 0 {
+    /// Loads bytes until at least 57 bits are buffered or loading has to stop.
+    fn refill<T: Stream + ?Sized>(&mut self, s: &mut T) {
+        while self.count <= 56 && self.stop.is_none() {
             if self.pos >= self.limit {
-                return Err(Stop::Truncated);
+                self.stop = Some(Stop::Truncated);
+                break;
             }
-            let b = s.byte(self.pos).ok_or(Stop::Truncated)?;
+            let Some(b) = s.byte(self.pos) else {
+                self.stop = Some(Stop::Truncated);
+                break;
+            };
             if b == 0xFF {
-                // Any marker inside an MCU means the data is broken (or a fragment ended).
-                if s.byte(self.pos + 1).ok_or(Stop::Truncated)? != 0x00 {
-                    return Err(Stop::Corrupt(self.pos));
+                match s.byte(self.pos + 1) {
+                    Some(0x00) => self.pos += 2,
+                    // A marker: the entropy-coded data ends here.
+                    Some(_) => {
+                        self.stop = Some(Stop::Corrupt(self.pos));
+                        break;
+                    }
+                    None => {
+                        self.stop = Some(Stop::Truncated);
+                        break;
+                    }
                 }
-                self.pos += 2;
             } else {
                 self.pos += 1;
             }
-            self.acc = u32::from(b);
-            self.count = 8;
+            self.acc |= u64::from(b) << (56 - self.count);
+            self.count += 8;
         }
-        self.count -= 1;
-        Ok((self.acc >> self.count) & 1)
+    }
+
+    /// The next `n` (<= 16) bits, right-aligned, without consuming them.
+    fn peek<T: Stream + ?Sized>(&mut self, s: &mut T, n: u32) -> Result<u32, Stop> {
+        if self.count < n {
+            self.refill(s);
+            if self.count < n {
+                return Err(self.stop.unwrap_or(Stop::Truncated));
+            }
+        }
+        Ok((self.acc >> (64 - n)) as u32)
+    }
+
+    fn consume(&mut self, n: u32) {
+        self.acc = self.acc.checked_shl(n).unwrap_or(0);
+        self.count -= n;
+    }
+
+    fn skip<T: Stream + ?Sized>(&mut self, s: &mut T, n: u32) -> Result<(), Stop> {
+        if n > 0 {
+            self.peek(s, n)?;
+            self.consume(n);
+        }
+        Ok(())
     }
 
     /// F.2.2.1 RECEIVE then EXTEND: an `n`-bit value as a signed difference.
@@ -634,10 +714,8 @@ impl Bits {
         if n == 0 {
             return Ok(0);
         }
-        let mut v: i32 = 0;
-        for _ in 0..n {
-            v = (v << 1) | self.bit(s)? as i32;
-        }
+        let v = self.peek(s, n)? as i32;
+        self.consume(n);
         Ok(if v < (1 << (n - 1)) {
             v - (1 << n) + 1
         } else {
@@ -645,39 +723,61 @@ impl Bits {
         })
     }
 
-    fn skip<T: Stream + ?Sized>(&mut self, s: &mut T, n: u32) -> Result<(), Stop> {
-        for _ in 0..n {
-            self.bit(s)?;
-        }
-        Ok(())
-    }
-
-    /// F.2.2.3 DECODE.
+    /// F.2.2.3 DECODE, with a lookahead table for codes up to `LOOKAHEAD` bits.
     fn decode<T: Stream + ?Sized>(&mut self, s: &mut T, t: &Huffman) -> Result<u8, Stop> {
+        if self.count < 16 {
+            self.refill(s);
+        }
+        let avail = self.count.min(16);
         let at = self.pos;
-        let mut code = self.bit(s)? as i32;
-        for len in 1..=16usize {
-            let max = t.maxcode.get(len).copied().unwrap_or(-1);
-            if code <= max {
-                let base = t.valptr.get(len).copied().unwrap_or(0);
-                let min = t.mincode.get(len).copied().unwrap_or(0);
-                let idx = usize::try_from(base + code - min).map_err(|_| Stop::Corrupt(at))?;
-                return t.values.get(idx).copied().ok_or(Stop::Corrupt(at));
+        if avail >= LOOKAHEAD {
+            let look = (self.acc >> (64 - LOOKAHEAD)) as usize;
+            if let Some(&(len, sym)) = t.fast.get(look)
+                && len > 0
+            {
+                self.consume(u32::from(len));
+                return Ok(sym);
             }
-            code = (code << 1) | self.bit(s)? as i32;
+        }
+        // A longer code (or few bits left): match lengths one by one.
+        let bits16 = (self.acc >> 48) as i32;
+        for len in 1..=16u32 {
+            if len > avail {
+                return Err(self.stop.unwrap_or(Stop::Truncated));
+            }
+            let code = bits16 >> (16 - len);
+            let l = len as usize;
+            if code <= t.maxcode.get(l).copied().unwrap_or(-1) {
+                let base = t.valptr.get(l).copied().unwrap_or(0);
+                let min = t.mincode.get(l).copied().unwrap_or(0);
+                let idx = usize::try_from(base + code - min).map_err(|_| Stop::Corrupt(at))?;
+                let sym = t.values.get(idx).copied().ok_or(Stop::Corrupt(at))?;
+                self.consume(len);
+                return Ok(sym);
+            }
         }
         Err(Stop::Corrupt(at))
     }
 
-    /// At a restart interval: drop the remaining bits and expect `RSTn` (F.1.2.3, B.2.1).
+    /// At a restart interval: drop the padding bits and expect `RSTn` (F.1.2.3, B.2.1).
     fn restart<T: Stream + ?Sized>(&mut self, s: &mut T, n: u8) -> Result<(), Stop> {
+        // Only the padding of the last byte may be left before the marker.
+        if self.count >= 8 {
+            return Err(Stop::Corrupt(self.pos));
+        }
+        self.acc = 0;
         self.count = 0;
-        match (s.byte(self.pos), s.byte(self.pos + 1)) {
+        self.stop = None;
+        let mut pos = self.pos;
+        while s.byte(pos) == Some(0xFF) && s.byte(pos + 1) == Some(0xFF) {
+            pos += 1;
+        }
+        match (s.byte(pos), s.byte(pos + 1)) {
             (Some(0xFF), Some(m)) if m == 0xD0 + n => {
-                self.pos += 2;
+                self.pos = pos + 2;
                 Ok(())
             }
-            (Some(_), Some(_)) => Err(Stop::Corrupt(self.pos)),
+            (Some(_), Some(_)) => Err(Stop::Corrupt(pos)),
             _ => Err(Stop::Truncated),
         }
     }
