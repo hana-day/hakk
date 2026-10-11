@@ -12,7 +12,8 @@ use image::{ExtendedColorType, codecs::jpeg::JpegEncoder};
 use super::{
     Generated, Meta,
     exif::Exif,
-    profile::{JpegProfile, Segment},
+    mp4,
+    profile::{JpegProfile, Profiles, Segment},
 };
 use crate::rng::Rng;
 
@@ -60,7 +61,12 @@ fn comment(rng: &mut Rng) -> Vec<u8> {
 
 /// A JPEG following a device profile: header segments in the device's order, an EXIF
 /// thumbnail if the device embeds one, and trailing bytes after EOI if it appends any.
-pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<Generated> {
+pub fn generate_profiled(
+    p: &JpegProfile,
+    profiles: &Profiles,
+    target: u64,
+    rng: &mut Rng,
+) -> Result<Generated> {
     let [aw, ah] = p.aspect;
     let pixels = target as f64 / BYTES_PER_PIXEL;
     let height = ((pixels * f64::from(ah) / f64::from(aw)).sqrt() as u32 / 16).max(1) * 16;
@@ -80,6 +86,19 @@ pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<
     let exif = Exif::for_camera(&p.make, &p.model, rng);
     let exif_len = rng.range(p.exif_len[0], p.exif_len[1]) as usize;
 
+    // Parts after the image, listed in the XMP container directory.
+    let mut appended: Vec<(&str, &str, Vec<u8>)> = Vec::new();
+    if let Some([lo, hi]) = p.gain_map {
+        appended.push(("image/jpeg", "GainMap", noise_jpeg(rng.range(lo, hi), rng)?));
+    }
+    if let Some(m) = &p.motion
+        && let Some(vp) = profiles.video.get(&m.profile)
+    {
+        let size = rng.range(m.size[0], m.size[1]);
+        let video = mp4::generate_profiled(vp, size, &mut rng.fork()).bytes;
+        appended.push(("video/mp4", "MotionPhoto", video));
+    }
+
     let mut out = vec![0xFF, 0xD8];
     for s in &p.segments {
         match s {
@@ -95,12 +114,16 @@ pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<
             Segment::DhtEach => main.dht.iter().for_each(|t| out.extend(segment(0xC4, t))),
             Segment::Sof => out.extend(segment(0xC0, &main.sof)),
             Segment::Dri => out.extend(segment(0xDD, &main.dri)),
+            Segment::Xmp => out.extend(segment(0xE1, &xmp(&appended, p.motion.is_some()))),
         }
     }
     out.extend_from_slice(&main.scan);
+    for (_, _, part) in &appended {
+        out.extend_from_slice(part);
+    }
     if let Some([lo, hi]) = p.trailer {
-        let len = rng.range(lo, hi) as usize;
-        out.extend(no_markers(rng.bytes(len)));
+        // Phones pad files with zeros (Samsung, LG, Wiko).
+        out.extend(vec![0u8; rng.range(lo, hi) as usize]);
     }
 
     Ok(Generated {
@@ -112,6 +135,41 @@ pub fn generate_profiled(p: &JpegProfile, target: u64, rng: &mut Rng) -> Result<
             ..Meta::default()
         },
     })
+}
+
+/// An XMP packet (APP1 payload) with a container directory listing `appended` after the
+/// primary image, as Ultra HDR and motion photos do.
+///
+/// Reference: Android "Ultra HDR image format" and "Motion photo format" (XMP
+/// `Container:Directory`, `Item:Mime`, `Item:Semantic`, `Item:Length`, `Item:Padding`).
+fn xmp(appended: &[(&str, &str, Vec<u8>)], motion: bool) -> Vec<u8> {
+    let mut x = String::from("http://ns.adobe.com/xap/1.0/\0");
+    x.push_str(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">"#);
+    x.push_str(r#"<rdf:Description xmlns:Container="http://ns.google.com/photos/1.0/container/" xmlns:Item="http://ns.google.com/photos/1.0/container/item/" xmlns:GCamera="http://ns.google.com/photos/1.0/camera/""#);
+    if motion {
+        x.push_str(r#" GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1""#);
+    }
+    x.push('>');
+    if !appended.is_empty() {
+        x.push_str("<Container:Directory><rdf:Seq>");
+        x.push_str(r#"<rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="image/jpeg" Item:Semantic="Primary" Item:Length="0" Item:Padding="0"/></rdf:li>"#);
+        for (mime, semantic, part) in appended {
+            x.push_str(&format!(
+                r#"<rdf:li rdf:parseType="Resource"><Container:Item Item:Mime="{mime}" Item:Semantic="{semantic}" Item:Length="{}" Item:Padding="0"/></rdf:li>"#,
+                part.len()
+            ));
+        }
+        x.push_str("</rdf:Seq></Container:Directory>");
+    }
+    x.push_str("</rdf:Description></rdf:RDF></x:xmpmeta>");
+    x.into_bytes()
+}
+
+/// A noise JPEG of roughly `target` bytes (for gain maps).
+fn noise_jpeg(target: u64, rng: &mut Rng) -> Result<Vec<u8>> {
+    // Noise at quality 90 is about 1.6 bytes per pixel.
+    let side = ((target as f64 / 1.6).sqrt() as u32 / 16).max(1) * 16;
+    encode_noise(side, side, 90, rng)
 }
 
 /// Removes `FF D8` and `FF D9` from random filler. Real vendor data rarely contains them,

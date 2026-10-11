@@ -39,12 +39,28 @@ pub struct JpegProfile {
     pub exif_len: Range,
     /// Size of the JPEG thumbnail embedded in EXIF, if any.
     pub thumbnail: Option<Range>,
-    /// Bytes appended after the final EOI, if any.
+    /// Bytes appended after the final EOI, if any (zeros, as phones pad files).
     pub trailer: Option<Range>,
+    /// An Ultra HDR gain map (a second JPEG of about this size) after the image, listed
+    /// in an XMP container directory.
+    #[serde(default)]
+    pub gain_map: Option<Range>,
+    /// A motion photo's video after the image (and gain map), listed in the directory.
+    #[serde(default)]
+    pub motion: Option<Motion>,
     /// Restart interval in rows of MCUs (one RST marker every N rows); none if absent.
     /// Requires a `dri` entry in `segments`.
     #[serde(default)]
     pub restart_rows: Option<u16>,
+}
+
+/// A motion photo's video.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Motion {
+    /// A video profile from the same file.
+    pub profile: String,
+    pub size: Range,
 }
 
 /// A header segment of a profiled JPEG.
@@ -69,6 +85,8 @@ pub enum Segment {
     Sof,
     /// The restart interval (only with `restart_rows`).
     Dri,
+    /// An XMP packet (APP1), with a container directory if parts are appended.
+    Xmp,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +156,15 @@ impl Profiles {
             }
             if j.restart_rows.is_some() != j.segments.contains(&Segment::Dri) {
                 bail!("jpeg.{name}: restart_rows and a dri segment go together");
+            }
+            let appended = j.gain_map.is_some() || j.motion.is_some();
+            if appended && !j.segments.contains(&Segment::Xmp) {
+                bail!("jpeg.{name}: appended parts need an xmp segment for their directory");
+            }
+            if let Some(m) = &j.motion
+                && !self.video.contains_key(&m.profile)
+            {
+                bail!("jpeg.{name}: no video profile {:?}", m.profile);
             }
             if j.restart_rows == Some(0) {
                 bail!("jpeg.{name}: restart_rows must be positive");

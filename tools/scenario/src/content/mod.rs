@@ -5,7 +5,7 @@
 
 mod exif;
 mod jpeg;
-mod mp4;
+pub(crate) mod mp4;
 mod picture;
 pub mod profile;
 
@@ -51,7 +51,7 @@ pub fn generate(
         (ContentKind::Jpeg, None) => jpeg::generate(target, rng),
         (ContentKind::Mp4, None) => Ok(mp4::generate(target, rng)),
         (ContentKind::Jpeg, Some(name)) => match profiles.jpeg.get(name) {
-            Some(p) => jpeg::generate_profiled(p, target, rng),
+            Some(p) => jpeg::generate_profiled(p, profiles, target, rng),
             None => bail!("no jpeg profile named {name:?}"),
         },
         (ContentKind::Mp4, Some(name)) => match profiles.video.get(name) {
