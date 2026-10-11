@@ -25,6 +25,8 @@ pub struct Mp4 {
     pub moov_first: bool,
     /// Chunks checked against the data (0 if there is no `moov`).
     pub chunks_checked: u32,
+    /// Whether a `moov` box was found.
+    pub has_moov: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +110,7 @@ pub fn carve<S: BlockSource + ?Sized>(r: &mut Reader<S>, start: u64, max_len: u6
         brand,
         moov_first,
         chunks_checked: 0,
+        has_moov: moov.is_some(),
     };
     let (Some(moov), Some(_)) = (moov, mdat) else {
         return Some(out);

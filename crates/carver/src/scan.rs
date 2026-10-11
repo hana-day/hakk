@@ -100,16 +100,20 @@ pub fn carve_at<S: BlockSource + ?Sized>(
             .filter(|_| matches!(status, Status::Corrupt { .. }))
             .and_then(|o| fragments::reassemble(r, at, opts.max_jpeg, &o))
             .filter(|f| f.complete);
-        return Some(match joined {
+        let mut found = match joined {
             Some(f) => Found {
-                offset: at,
                 len: f.fragments.iter().map(|x| x.1).sum(),
-                kind: Kind::Jpeg,
                 status: Status::Complete,
                 fragments: f.fragments,
+                ..Found::contiguous(at, 0, Kind::Jpeg, Status::Complete)
             },
             None => Found::contiguous(at, j.len, Kind::Jpeg, status),
-        });
+        };
+        if j.width > 0 && j.height > 0 {
+            found.width = Some(u32::from(j.width));
+            found.height = Some(u32::from(j.height));
+        }
+        return Some(found);
     }
     if head.get(4..8) == Some(b"ftyp") {
         let m = mp4::carve(r, at, opts.max_video)?;
@@ -123,7 +127,9 @@ pub fn carve_at<S: BlockSource + ?Sized>(
             mp4::Status::Corrupt { at } => Status::Corrupt { at },
             mp4::Status::Truncated => Status::Truncated,
         };
-        return Some(Found::contiguous(at, m.len, kind, status));
+        let mut found = Found::contiguous(at, m.len, kind, status);
+        found.has_index = Some(m.has_moov);
+        return Some(found);
     }
     None
 }

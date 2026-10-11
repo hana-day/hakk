@@ -24,6 +24,12 @@ pub struct Found {
     pub status: Status,
     /// `(source offset, length)` of each piece in file order; one piece if contiguous.
     pub fragments: Vec<(u64, u64)>,
+    /// Picture dimensions, if known (from the JPEG frame header).
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// For videos: whether the index (`moov`) was found. A video without one usually has
+    /// intact data that a rebuilt index can make playable again.
+    pub has_index: Option<bool>,
 }
 
 impl Found {
@@ -35,6 +41,9 @@ impl Found {
             kind,
             status,
             fragments: vec![(offset, len)],
+            width: None,
+            height: None,
+            has_index: None,
         }
     }
 
