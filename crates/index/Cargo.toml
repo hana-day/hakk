@@ -1,0 +1,18 @@
+[package]
+name = "index"
+description = "Scan result index (SQLite): found files, bad ranges and scan progress for resuming"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `bundled` builds SQLite from source so Windows/macOS need no system library. Default
+# features are off to keep the wasm-only backend out of the dependency tree.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "cache"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

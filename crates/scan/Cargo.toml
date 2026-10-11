@@ -1,0 +1,19 @@
+[package]
+name = "scan"
+description = "Scan pipeline: one sequential reader feeding analyzers (file system parsing, carving)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blocksource = { path = "../blocksource" }
+crossbeam-channel = "0.5.17"
+index = { path = "../index" }
+
+[dev-dependencies]
+crossbeam-channel = "0.5.17"
+tempfile = "3.27.0"
