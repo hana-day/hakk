@@ -16,8 +16,8 @@ use super::{
 };
 use crate::rng::Rng;
 
-/// Approximate bytes per pixel when encoding noise at quality 90.
-const BYTES_PER_PIXEL: f64 = 1.6;
+/// Approximate bytes per pixel when encoding a synthetic picture at quality 90.
+const BYTES_PER_PIXEL: f64 = 0.2;
 
 pub fn generate(target: u64, rng: &mut Rng) -> Result<Generated> {
     // A 3:2 image of roughly `target` bytes (dimensions multiples of 16).
@@ -25,8 +25,7 @@ pub fn generate(target: u64, rng: &mut Rng) -> Result<Generated> {
     let height = ((pixels / 1.5).sqrt() as u32 / 16).max(1) * 16;
     let width = (height * 3 / 2 / 16).max(1) * 16;
 
-    let mut pixels = vec![0u8; width as usize * height as usize * 3];
-    rng.fill(&mut pixels);
+    let pixels = super::picture::picture(width, height, rng);
     let mut encoded = Vec::new();
     JpegEncoder::new_with_quality(&mut encoded, 90).encode(
         &pixels,
@@ -147,8 +146,7 @@ fn encode_noise(width: u32, height: u32, quality: u8, rng: &mut Rng) -> Result<V
 
 /// Encodes noise with 4:2:0 subsampling and, if given, a restart interval (in MCUs).
 fn encode_420(width: u32, height: u32, restart: Option<u16>, rng: &mut Rng) -> Result<Vec<u8>> {
-    let mut pixels = vec![0u8; width as usize * height as usize * 3];
-    rng.fill(&mut pixels);
+    let pixels = super::picture::picture(width, height, rng);
     let mut encoded = Vec::new();
     let mut enc = jpeg_encoder::Encoder::new(&mut encoded, 90);
     enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);

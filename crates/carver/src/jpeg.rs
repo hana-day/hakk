@@ -65,6 +65,7 @@ pub(crate) fn carve_with_plan<S: BlockSource + ?Sized>(
         segments: 0,
         scans: 0,
         plan: None,
+        quant_dc: [1; 4],
     };
     let (end, status) = p.run();
     if p.segments == 0 {
@@ -92,6 +93,8 @@ struct Component {
     id: u8,
     h: u8,
     v: u8,
+    /// Quantization table id.
+    tq: u8,
 }
 
 struct Frame {
@@ -160,6 +163,8 @@ struct Parser<'r, 'a, S: BlockSource + ?Sized> {
     scans: u32,
     /// The plan of the last decoded scan.
     plan: Option<Plan>,
+    /// The DC entry of each quantization table (to scale DC coefficients).
+    quant_dc: [i32; 4],
 }
 
 /// Why decoding stopped.
@@ -218,6 +223,7 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
         self.segments += 1;
         match marker {
             0xC4 => self.dht(body, len - 2).ok_or(Stop::Corrupt(pos))?,
+            0xDB => self.dqt(body, len - 2).ok_or(Stop::Corrupt(pos))?,
             0xC0 | 0xC1 => self.sof(body).ok_or(Stop::Corrupt(pos))?,
             0xC2 => {
                 self.progressive = true;
@@ -246,6 +252,23 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
         (at == end).then_some(())
     }
 
+    /// DQT (B.2.4.1): keeps each table's DC entry (the first value in zigzag order).
+    fn dqt(&mut self, mut at: u64, len: u64) -> Option<()> {
+        let end = at + len;
+        while at < end {
+            let pq_tq = self.r.byte(at)?;
+            let wide = pq_tq >> 4 != 0;
+            let dc = if wide {
+                i32::from(self.r.u16_be(at + 1)?)
+            } else {
+                i32::from(self.r.byte(at + 1)?)
+            };
+            *self.quant_dc.get_mut(usize::from(pq_tq & 0x03))? = dc.max(1);
+            at += 1 + 64 * if wide { 2 } else { 1 };
+        }
+        (at == end).then_some(())
+    }
+
     /// SOF (B.2.2): dimensions and sampling factors.
     fn sof(&mut self, at: u64) -> Option<()> {
         let height = self.r.u16_be(at + 1)?;
@@ -257,12 +280,17 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
         let mut components = Vec::with_capacity(n);
         for i in 0..n as u64 {
             let c = self.r.slice(at + 6 + 3 * i, 3)?;
-            let (id, hv) = (*c.first()?, *c.get(1)?);
+            let (id, hv, tq) = (*c.first()?, *c.get(1)?, *c.get(2)?);
             let (h, v) = (hv >> 4, hv & 0x0F);
             if !(1..=4).contains(&h) || !(1..=4).contains(&v) {
                 return None;
             }
-            components.push(Component { id, h, v });
+            components.push(Component {
+                id,
+                h,
+                v,
+                tq: tq & 0x03,
+            });
         }
         let hmax = components.iter().map(|c| c.h).max()?;
         let vmax = components.iter().map(|c| c.v).max()?;
@@ -314,7 +342,9 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
             let (Some(dc), Some(ac)) = (dc, ac) else {
                 return Err(Stop::Corrupt(at));
             };
-            layout.push((c.h, c.v, dc.clone(), ac.clone()));
+            let quant = self.quant_dc.get(usize::from(c.tq)).copied().unwrap_or(1);
+            let luma = frame.components.first().is_some_and(|f| f.id == c.id);
+            layout.push((c.h, c.v, dc.clone(), ac.clone(), quant, luma));
         }
         let (mcus, blocks_per_mcu): (u64, Vec<u32>) = if ns == 1 {
             // A non-interleaved scan: one block per MCU over the component's own grid.
@@ -339,18 +369,45 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
             (u64::from(mx) * u64::from(my), per)
         };
 
+        let interleaved = ns > 1;
+        let luma_cols = u64::from(u32::from(frame.width).div_ceil(8 * u32::from(frame.hmax)))
+            * u64::from(frame.hmax);
+        let mcu_cols = if interleaved {
+            u64::from(u32::from(frame.width).div_ceil(8 * u32::from(frame.hmax)))
+        } else {
+            u64::from(u32::from(frame.width).div_ceil(8))
+        };
         let plan = Plan {
             layout: layout
                 .into_iter()
                 .zip(blocks_per_mcu)
-                .map(|((_, _, dc, ac), n)| (n, dc, ac))
+                .map(|((h, v, dc, ac, quant, luma), n)| ScanComp {
+                    n,
+                    h: u64::from(h),
+                    v: u64::from(v),
+                    dc,
+                    ac,
+                    quant,
+                    luma,
+                })
                 .collect(),
             mcus,
             restart: self.restart,
             data,
+            interleaved,
+            mcu_cols,
+            luma_cols: if interleaved { luma_cols } else { mcu_cols },
         };
         self.scans += 1;
-        let outcome = decode(&plan, self.r, Snapshot::start(data), self.limit, None, None);
+        let outcome = decode(
+            &plan,
+            self.r,
+            Snapshot::start(data),
+            self.limit,
+            None,
+            None,
+            None,
+        );
         self.plan = Some(plan);
         match outcome {
             Outcome::Done(pos) => Ok(pos),
@@ -397,15 +454,34 @@ impl<S: BlockSource + ?Sized> Stream for Reader<'_, S> {
     }
 }
 
+/// One component of a scan.
+#[derive(Clone)]
+struct ScanComp {
+    /// Blocks per MCU (h x v when interleaved, 1 otherwise).
+    n: u32,
+    h: u64,
+    v: u64,
+    dc: Huffman,
+    ac: Huffman,
+    /// DC quantizer, to scale DC coefficients back.
+    quant: i32,
+    /// The first (luminance) component, whose DC values form a 1/8-scale image.
+    luma: bool,
+}
+
 /// What decoding one baseline scan needs.
 #[derive(Clone)]
 pub(crate) struct Plan {
-    /// Per scan component: (blocks per MCU, DC table, AC table).
-    layout: Vec<(u32, Huffman, Huffman)>,
+    layout: Vec<ScanComp>,
     pub mcus: u64,
     restart: u16,
     /// Offset of the first entropy-coded byte.
     pub data: u64,
+    interleaved: bool,
+    /// MCUs per row.
+    mcu_cols: u64,
+    /// Luminance blocks per row.
+    pub luma_cols: u64,
 }
 
 /// Decoder state at the start of an MCU, enough to resume from there.
@@ -417,13 +493,8 @@ pub(crate) struct Snapshot {
     count: u32,
     pub mcu: u64,
     rst: u8,
-}
-
-impl Plan {
-    /// Whether the scan has restart markers (a strong check when splicing fragments).
-    pub fn has_restart(&self) -> bool {
-        self.restart > 0
-    }
+    /// DC predictors per scan component (F.2.1.3.1).
+    pred: [i32; 4],
 }
 
 impl Snapshot {
@@ -434,6 +505,7 @@ impl Snapshot {
             count: 0,
             mcu: 0,
             rst: 0,
+            pred: [0; 4],
         }
     }
 }
@@ -448,7 +520,9 @@ pub(crate) enum Outcome {
 }
 
 /// Decodes `plan`'s MCUs from `from` until the end, an error, or `cap` (an offset).
-/// With `snaps`, records the state at every MCU start.
+/// With `snaps`, records the state at every MCU start; with `dcs`, records each luminance
+/// block's DC value (scaled back by its quantizer) as `(block index, value)`, where the
+/// index is `row * luma_cols + column` in the 1/8-scale image.
 pub(crate) fn decode<T: Stream + ?Sized>(
     plan: &Plan,
     s: &mut T,
@@ -456,6 +530,7 @@ pub(crate) fn decode<T: Stream + ?Sized>(
     limit: u64,
     cap: Option<u64>,
     mut snaps: Option<&mut Vec<Snapshot>>,
+    mut dcs: Option<&mut Vec<(u64, i32)>>,
 ) -> Outcome {
     let mut bits = Bits {
         pos: from.pos,
@@ -464,6 +539,7 @@ pub(crate) fn decode<T: Stream + ?Sized>(
         limit,
     };
     let mut rst = from.rst;
+    let mut pred = from.pred;
     for mcu in from.mcu..plan.mcus {
         let snap = Snapshot {
             pos: bits.pos,
@@ -471,6 +547,7 @@ pub(crate) fn decode<T: Stream + ?Sized>(
             count: bits.count,
             mcu,
             rst,
+            pred,
         };
         if cap.is_some_and(|c| bits.pos >= c) {
             return Outcome::Capped;
@@ -482,10 +559,24 @@ pub(crate) fn decode<T: Stream + ?Sized>(
             if plan.restart > 0 && mcu > 0 && mcu % u64::from(plan.restart) == 0 {
                 bits.restart(s, rst)?;
                 rst = (rst + 1) % 8;
+                pred = [0; 4];
             }
-            for (n, dc, ac) in &plan.layout {
-                for _ in 0..*n {
-                    block(s, &mut bits, dc, ac)?;
+            let (mx, my) = (mcu % plan.mcu_cols, mcu / plan.mcu_cols);
+            for (ci, c) in plan.layout.iter().enumerate() {
+                for k in 0..u64::from(c.n) {
+                    let diff = block(s, &mut bits, &c.dc, &c.ac)?;
+                    let p = pred.get_mut(ci).ok_or(Stop::Corrupt(bits.pos))?;
+                    *p = p.wrapping_add(diff);
+                    if c.luma
+                        && let Some(v) = dcs.as_deref_mut()
+                    {
+                        let (bx, by) = if plan.interleaved {
+                            (mx * c.h + k % c.h, my * c.v + k / c.h)
+                        } else {
+                            (mx, my)
+                        };
+                        v.push((by * plan.luma_cols + bx, p.wrapping_mul(c.quant)));
+                    }
                 }
             }
             Ok(())
@@ -538,6 +629,22 @@ impl Bits {
         Ok((self.acc >> self.count) & 1)
     }
 
+    /// F.2.2.1 RECEIVE then EXTEND: an `n`-bit value as a signed difference.
+    fn receive_extend<T: Stream + ?Sized>(&mut self, s: &mut T, n: u32) -> Result<i32, Stop> {
+        if n == 0 {
+            return Ok(0);
+        }
+        let mut v: i32 = 0;
+        for _ in 0..n {
+            v = (v << 1) | self.bit(s)? as i32;
+        }
+        Ok(if v < (1 << (n - 1)) {
+            v - (1 << n) + 1
+        } else {
+            v
+        })
+    }
+
     fn skip<T: Stream + ?Sized>(&mut self, s: &mut T, n: u32) -> Result<(), Stop> {
         for _ in 0..n {
             self.bit(s)?;
@@ -576,18 +683,19 @@ impl Bits {
     }
 }
 
-/// Decodes one 8x8 block's coefficients without reconstructing them (F.2.2.1-F.2.2.2).
+/// Decodes one 8x8 block (F.2.2.1-F.2.2.2) and returns its DC difference. The AC
+/// coefficients are skipped without reconstructing them.
 fn block<T: Stream + ?Sized>(
     s: &mut T,
     bits: &mut Bits,
     dc: &Huffman,
     ac: &Huffman,
-) -> Result<(), Stop> {
+) -> Result<i32, Stop> {
     let size = bits.decode(s, dc)?;
     if size > 11 {
         return Err(Stop::Corrupt(bits.pos));
     }
-    bits.skip(s, u32::from(size))?;
+    let diff = bits.receive_extend(s, u32::from(size))?;
     let mut k = 1u32;
     while k < 64 {
         let at = bits.pos;
@@ -610,7 +718,7 @@ fn block<T: Stream + ?Sized>(
     if k > 64 {
         return Err(Stop::Corrupt(bits.pos));
     }
-    Ok(())
+    Ok(diff)
 }
 
 #[cfg(test)]
