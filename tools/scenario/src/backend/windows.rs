@@ -13,13 +13,40 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 
-use super::{Backend, Mounted, run};
+use super::{Backend, Format, Mounted, run};
 use crate::scenario::FsKind;
 
-pub struct Vhd;
+pub struct Vhd(pub Format);
+
+impl Vhd {
+    /// `Format-Volume` arguments for the file system and cluster size. Windows picks
+    /// FAT12 or FAT16 itself for "FAT", depending on the volume size.
+    fn format_args(&self) -> Result<String> {
+        let f = &self.0;
+        let fs = match f.fs {
+            FsKind::Exfat => "exFAT",
+            FsKind::Fat32 => "FAT32",
+            FsKind::Fat12 | FsKind::Fat16 => "FAT",
+            FsKind::None => bail!("no OS driver for disks without a file system"),
+        };
+        let mut args = format!(
+            "-FileSystem {fs} -NewFileSystemLabel {} -Force -Confirm:$false",
+            quote(Path::new(&f.label))
+        );
+        if let Some(c) = f.cluster {
+            args.push_str(&format!(" -AllocationUnitSize {c}"));
+        }
+        Ok(args)
+    }
+}
 
 impl Backend for Vhd {
-    fn create(&self, dir: &Path, size: u64, fs: FsKind, label: &str) -> Result<PathBuf> {
+    fn spec(&self) -> &Format {
+        &self.0
+    }
+
+    fn create(&self, dir: &Path) -> Result<PathBuf> {
+        let size = self.0.size;
         if !size.is_multiple_of(1 << 20) {
             bail!("on Windows the size must be a whole number of MiB");
         }
@@ -40,31 +67,30 @@ impl Backend for Vhd {
         let _ = fs::remove_file(&script);
         result?;
 
-        let FsKind::Exfat = fs else {
-            anyhow::bail!("{fs:?} has no OS driver");
+        // New-Partition places the partition itself unless an offset is given.
+        let place = match self.0.partition_start {
+            Some(start) => format!("-Offset {}", start * 512),
+            None => String::new(),
         };
         powershell(&format!(
             "$d = Mount-DiskImage -ImagePath {img} -PassThru | Get-Disk
              Initialize-Disk -Number $d.Number -PartitionStyle MBR
-             $p = New-Partition -DiskNumber $d.Number -UseMaximumSize -AssignDriveLetter
-             Format-Volume -Partition $p -FileSystem exFAT -NewFileSystemLabel {label} -Force -Confirm:$false | Out-Null
+             $p = New-Partition -DiskNumber $d.Number {place} -UseMaximumSize -AssignDriveLetter
+             Format-Volume -Partition $p {args} | Out-Null
              Dismount-DiskImage -ImagePath {img} | Out-Null",
             img = quote(&image),
-            label = quote(Path::new(label)),
+            args = self.format_args()?,
         ))?;
         Ok(image)
     }
 
-    fn format(&self, image: &Path, fs: FsKind, label: &str) -> Result<()> {
-        let FsKind::Exfat = fs else {
-            anyhow::bail!("{fs:?} has no OS driver");
-        };
+    fn format(&self, image: &Path) -> Result<()> {
+        let args = self.format_args()?;
         let m = self.mount(image)?;
         // Quick format by default (data areas are kept unless -Full is given).
         let result = powershell(&format!(
-            "Format-Volume -DriveLetter {letter} -FileSystem exFAT -NewFileSystemLabel {label} -Force -Confirm:$false | Out-Null",
+            "Format-Volume -DriveLetter {letter} {args} | Out-Null",
             letter = m.root().to_string_lossy().chars().next().unwrap_or('Z'),
-            label = quote(Path::new(label)),
         ));
         m.unmount()?;
         result.map(drop)

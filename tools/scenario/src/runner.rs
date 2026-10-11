@@ -35,8 +35,15 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
     if sc.fs == FsKind::None {
         return run_raw(sc, out_dir, &mut rng);
     }
-    let backend = backend::native()?;
-    let image = backend.create(out_dir, sc.size.0, sc.fs, &label)?;
+    let backend = backend::native(backend::Format {
+        fs: sc.fs,
+        label: label.clone(),
+        size: sc.size.0,
+        cluster: sc.cluster.map(|c| c.0),
+        partition_start: sc.partition_start,
+        partition_type: sc.partition_type,
+    })?;
+    let image = backend.create(out_dir)?;
 
     let mut files: Vec<Tracked> = Vec::new();
     for (step_no, step) in sc.steps.iter().enumerate() {
@@ -118,7 +125,7 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
                 anyhow::bail!("steps[{step_no}]: `place` needs fs = \"none\"");
             }
             Step::Format => {
-                backend.format(&image, sc.fs, &label)?;
+                backend.format(&image)?;
                 for f in files.iter_mut().filter(|f| f.entry.deleted_at.is_none()) {
                     f.entry.deleted_at = Some(step_no);
                 }
@@ -144,7 +151,8 @@ pub fn run(sc: &Scenario, out_dir: &Path) -> Result<Manifest> {
         image: IMAGE_NAME.to_owned(),
         image_size: sc.size.0,
         partition_offset: partition_offset(&final_image),
-        cluster_size: exfat_cluster_size(&final_image),
+        detected_fs: volume_info(&final_image).0,
+        cluster_size: volume_info(&final_image).1,
         generator: generator(),
         files: files.into_iter().map(|f| f.entry).collect(),
     })
@@ -184,6 +192,7 @@ fn run_raw(sc: &Scenario, out_dir: &Path, rng: &mut Rng) -> Result<Manifest> {
         image: IMAGE_NAME.to_owned(),
         image_size: sc.size.0,
         partition_offset: 0,
+        detected_fs: None,
         cluster_size: None,
         generator: generator(),
         files,
@@ -234,8 +243,7 @@ pub fn hex(bytes: &[u8]) -> String {
 /// Where the file system starts: 0 without a partition table, or the first MBR partition.
 /// Reference: MBR partition table (4 x 16-byte entries at offset 446; start LBA at entry +8).
 fn partition_offset(image: &[u8]) -> u64 {
-    let is_vbr = |at: usize| image.get(at + 3..at + 11) == Some(b"EXFAT   ".as_slice());
-    if is_vbr(0) {
+    if detect_fs(image.get(..512).unwrap_or_default()).is_some() {
         return 0;
     }
     let lba = image
@@ -249,17 +257,48 @@ fn partition_offset(image: &[u8]) -> u64 {
     }
 }
 
-/// Reads the cluster size from the exFAT boot sector.
-/// Reference: Microsoft "exFAT file system specification" 3.1.14 BytesPerSectorShift,
-/// 3.1.15 SectorsPerClusterShift.
-fn exfat_cluster_size(image: &[u8]) -> Option<u64> {
-    let vbr = image.get(usize::try_from(partition_offset(image)).ok()?..)?;
-    if vbr.get(3..11)? != b"EXFAT   " {
-        return None;
+/// The file system type named in a boot sector, if any.
+/// Reference: Microsoft "exFAT file system specification" 3.1.2 (FileSystemName);
+/// Microsoft "FAT32 File System Specification" (fatgen103) BS_FilSysType at 54 / 82.
+fn detect_fs(vbr: &[u8]) -> Option<&'static str> {
+    let at = |r: std::ops::Range<usize>| vbr.get(r).unwrap_or_default();
+    if at(3..11) == b"EXFAT   " {
+        Some("exfat")
+    } else if at(82..90) == b"FAT32   " {
+        Some("fat32")
+    } else if at(54..62) == b"FAT12   " {
+        Some("fat12")
+    } else if at(54..62) == b"FAT16   " {
+        Some("fat16")
+    } else {
+        None
     }
-    let bps = u32::from(*vbr.get(108)?);
-    let spc = u32::from(*vbr.get(109)?);
-    1u64.checked_shl(bps.checked_add(spc)?)
+}
+
+/// The detected file system and its cluster size, read from the volume boot sector.
+/// Reference: exFAT spec 3.1.14 BytesPerSectorShift / 3.1.15 SectorsPerClusterShift;
+/// fatgen103 BPB_BytsPerSec (11) and BPB_SecPerClus (13).
+fn volume_info(image: &[u8]) -> (Option<String>, Option<u64>) {
+    let start = usize::try_from(partition_offset(image)).unwrap_or(0);
+    let vbr = image.get(start..start + 512).unwrap_or_default();
+    let fs = detect_fs(vbr);
+    let cluster = match fs {
+        Some("exfat") => {
+            let bps = u32::from(*vbr.get(108).unwrap_or(&0));
+            let spc = u32::from(*vbr.get(109).unwrap_or(&0));
+            1u64.checked_shl(bps + spc)
+        }
+        Some(_) => {
+            let bps = vbr
+                .get(11..13)
+                .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                .map_or(0, u16::from_le_bytes);
+            let spc = *vbr.get(13).unwrap_or(&0);
+            Some(u64::from(bps) * u64::from(spc))
+        }
+        None => None,
+    };
+    (fs.map(str::to_owned), cluster)
 }
 
 fn generator() -> Generator {

@@ -15,6 +15,16 @@ pub struct Scenario {
     /// Size of the whole image.
     pub size: Size,
     pub fs: FsKind,
+    /// Cluster size; the formatter's default if absent.
+    #[serde(default)]
+    pub cluster: Option<Size>,
+    /// Start sector of a single MBR partition (e.g. 51, as a Canon camera formats a 32 MB
+    /// SD card so the data area lands on a 16 KiB boundary). No partition table if absent.
+    #[serde(default)]
+    pub partition_start: Option<u64>,
+    /// MBR partition type byte, if not the usual one for `fs` (Canon writes 0x04 for FAT12).
+    #[serde(default)]
+    pub partition_type: Option<u8>,
     pub steps: Vec<Step>,
     /// Device profiles, loaded from `profiles.toml` next to the scenario or one level up.
     #[serde(skip)]
@@ -25,6 +35,9 @@ pub struct Scenario {
 #[serde(rename_all = "lowercase")]
 pub enum FsKind {
     Exfat,
+    Fat12,
+    Fat16,
+    Fat32,
     /// No file system: files are placed directly on the disk with `place` steps, like the
     /// NIST CFReDS carving images. No OS driver is involved, so results match on every OS.
     None,
@@ -175,6 +188,12 @@ impl Scenario {
     fn validate(&self) -> Result<()> {
         if self.size.0 < 8 << 20 {
             bail!("image size must be at least 8MiB");
+        }
+        if self
+            .cluster
+            .is_some_and(|c| c.0 < 512 || !c.0.is_power_of_two())
+        {
+            bail!("cluster must be a power of two of at least 512 bytes");
         }
         for (i, step) in self.steps.iter().enumerate() {
             let place = matches!(step, Step::Place { .. });
