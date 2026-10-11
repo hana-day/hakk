@@ -291,7 +291,7 @@ pub struct PlannedFile {
     pub size: u64,
     pub date: Option<FileDate>,
     pub duration_seconds: Option<u32>,
-    pub confidence: Confidence,
+    pub confidence: Option<Confidence>,
     pub hidden: Option<HiddenReason>,
     pub reveal: Reveal,
     /// Status after verification.
@@ -367,7 +367,7 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
                     // A few deleted short names lost their first letter.
                     name_exact: rng.unit() >= 0.02,
                 },
-                confidence: confidence_for(status),
+                confidence: Some(confidence_for(status)),
                 offset,
                 size,
                 // Overwritten files have no readable embedded metadata; only the file
@@ -454,7 +454,7 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
             origin: FileOrigin::Carved {
                 named_from_metadata: named,
             },
-            confidence: Confidence::High,
+            confidence: None,
             offset: {
                 let region = regions.get(rng.range(0, CARVED_REGIONS) as usize);
                 let (start, len) = region.copied().unwrap_or((total / 100, total / 40));

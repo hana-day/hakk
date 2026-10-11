@@ -307,7 +307,8 @@ pub struct FoundFile {
     pub date: Option<FileDate>,
     /// Length of a video.
     pub duration_seconds: Option<u32>,
-    pub confidence: Confidence,
+    /// Judged by file system analysis only; `None` for carved files.
+    pub confidence: Option<Confidence>,
     pub status: FileStatus,
     pub hidden: Option<HiddenReason>,
     /// Repair offered for this file, if any.

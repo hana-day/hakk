@@ -20,7 +20,11 @@ offset: number | null, size: number, date: FileDate | null,
 /**
  * Length of a video.
  */
-durationSeconds: number | null, confidence: Confidence, status: FileStatus, hidden: HiddenReason | null, 
+durationSeconds: number | null, 
+/**
+ * Judged by file system analysis only; `None` for carved files.
+ */
+confidence: Confidence | null, status: FileStatus, hidden: HiddenReason | null, 
 /**
  * Repair offered for this file, if any.
  */
