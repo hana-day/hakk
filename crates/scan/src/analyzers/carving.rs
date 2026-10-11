@@ -2,14 +2,17 @@
 
 use std::sync::Mutex;
 
-use blocksource::BlockSource;
-use carver::{fragments, jpeg, mp4, reader::Reader, scan::Options};
+use carver::{
+    Found,
+    reader::Reader,
+    scan::{Options, carve_at, looks_like_header},
+};
 use index::{FileKind, NewFile, Preview, Status};
 
 use crate::{Analyzer, Block, Context, RangeSet};
 
-/// Finds JPEG and MP4/QuickTime files by their headers in each block and follows their
-/// structure with the `carver` parsers.
+/// Finds JPEG and MP4/QuickTime files by their headers in each block and carves them with
+/// `carver::scan::carve_at` (the same per-header step as `carver::scan`).
 ///
 /// Headers are checked at sector starts (files start on cluster boundaries in any file
 /// system), using the block's lookahead for a header that crosses the block end. A file
@@ -90,7 +93,7 @@ impl Analyzer for Carving {
             }
             let src = cx.source();
             let reader = parse.get_or_insert_with(|| Reader::new(src));
-            if let Some(file) = carve_at(reader, at, head, &self.opts) {
+            if let Some(file) = carve_at(reader, at, &self.opts).map(to_new_file) {
                 self.claim(&file);
                 cx.report(file);
             }
@@ -98,60 +101,31 @@ impl Analyzer for Carving {
     }
 }
 
-fn looks_like_header(head: &[u8]) -> bool {
-    head.starts_with(&[0xFF, 0xD8, 0xFF]) || head.get(4..8) == Some(b"ftyp")
-}
-
-/// Carves the file whose header is at `at`, the way `carver::scan` does for each header
-/// it meets (JPEG with fragment reassembly when broken; MP4/QuickTime by its boxes).
-fn carve_at<S: BlockSource + ?Sized>(
-    r: &mut Reader<'_, S>,
-    at: u64,
-    head: &[u8],
-    opts: &Options,
-) -> Option<NewFile> {
-    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        let j = jpeg::carve(r, at, opts.max_jpeg)?;
-        let mut file = NewFile::carved(FileKind::Jpeg, at, j.len);
-        file.status = match j.status {
-            jpeg::Status::Complete => Status::Recoverable,
-            jpeg::Status::Corrupt { .. } | jpeg::Status::Truncated => Status::Damaged,
-        };
-        if let jpeg::Status::Corrupt { .. } = j.status
-            && let Some(o) = opts.reassemble
-            && let Some(joined) = fragments::reassemble(r, at, opts.max_jpeg, &o)
-            && joined.complete
-        {
-            file.extents = joined
-                .fragments
-                .iter()
-                .map(|&(off, len)| off..off.saturating_add(len))
-                .collect();
-            file.size = joined.fragments.iter().map(|f| f.1).sum();
-            file.status = Status::Recoverable;
-        }
-        file.preview = Preview {
-            width: Some(u32::from(j.width)).filter(|w| *w > 0),
-            height: Some(u32::from(j.height)).filter(|h| *h > 0),
-            ..Preview::default()
-        };
-        Some(file)
-    } else {
-        let m = mp4::carve(r, at, opts.max_video)?;
-        let kind = if &m.brand == b"qt  " {
-            FileKind::Mov
-        } else {
-            FileKind::Mp4
-        };
-        let mut file = NewFile::carved(kind, at, m.len);
-        file.status = match m.status {
-            mp4::Status::Complete => Status::Recoverable,
-            mp4::Status::Corrupt { .. } => Status::Damaged,
-            // No chunk could be checked: there is no `moov` (e.g. the recording was
-            // interrupted), so the data may be fine but cannot be played as is.
-            mp4::Status::Truncated if m.chunks_checked == 0 => Status::MissingIndex,
-            mp4::Status::Truncated => Status::Damaged,
-        };
-        Some(file)
-    }
+/// A carver result as an index record.
+fn to_new_file(f: Found) -> NewFile {
+    let kind = match f.kind {
+        carver::Kind::Jpeg => FileKind::Jpeg,
+        carver::Kind::Mp4 => FileKind::Mp4,
+        carver::Kind::Mov => FileKind::Mov,
+    };
+    let mut file = NewFile::carved(kind, f.offset, f.len);
+    file.extents = f
+        .fragments
+        .iter()
+        .map(|&(off, len)| off..off.saturating_add(len))
+        .collect();
+    file.status = match f.status {
+        carver::Status::Complete => Status::Recoverable,
+        carver::Status::Corrupt { .. } => Status::Damaged,
+        // A video whose `moov` is missing (e.g. the recording was interrupted): the data
+        // is usually fine, but it cannot be played until the index is rebuilt.
+        carver::Status::Truncated if f.has_index == Some(false) => Status::MissingIndex,
+        carver::Status::Truncated => Status::Damaged,
+    };
+    file.preview = Preview {
+        width: f.width.filter(|w| *w > 0),
+        height: f.height.filter(|h| *h > 0),
+        ..Preview::default()
+    };
+    file
 }
