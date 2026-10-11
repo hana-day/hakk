@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, jpeg, mp4, reader::Reader};
+use crate::{Found, Kind, Status, fragments, jpeg, mp4, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -16,6 +16,8 @@ pub struct Options {
     pub max_jpeg: u64,
     /// Longest video to follow.
     pub max_video: u64,
+    /// Search for the missing fragments of broken JPEGs (`None` to skip it).
+    pub reassemble: Option<fragments::Options>,
 }
 
 impl Default for Options {
@@ -23,6 +25,7 @@ impl Default for Options {
         Self {
             max_jpeg: 64 << 20,
             max_video: 64 << 30,
+            reassemble: Some(fragments::Options::default()),
         }
     }
 }
@@ -55,36 +58,48 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
             }
             let head = data.get(off..off + 8).unwrap_or_default();
             let hit = if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
-                jpeg::carve(&mut parse, at, opts.max_jpeg).map(|j| Found {
-                    offset: at,
-                    len: j.len,
-                    kind: Kind::Jpeg,
-                    status: match j.status {
+                jpeg::carve(&mut parse, at, opts.max_jpeg).map(|j| {
+                    let status = match j.status {
                         jpeg::Status::Complete => Status::Complete,
                         jpeg::Status::Corrupt { at } => Status::Corrupt { at },
                         jpeg::Status::Truncated => Status::Truncated,
-                    },
+                    };
+                    let broken = matches!(status, Status::Corrupt { .. });
+                    let joined = opts
+                        .reassemble
+                        .filter(|_| broken)
+                        .and_then(|o| fragments::reassemble(&mut parse, at, opts.max_jpeg, &o))
+                        .filter(|r| r.complete);
+                    match joined {
+                        Some(r) => Found {
+                            offset: at,
+                            len: r.fragments.iter().map(|f| f.1).sum(),
+                            kind: Kind::Jpeg,
+                            status: Status::Complete,
+                            fragments: r.fragments,
+                        },
+                        None => Found::contiguous(at, j.len, Kind::Jpeg, status),
+                    }
                 })
             } else if head.get(4..8) == Some(b"ftyp") {
-                mp4::carve(&mut parse, at, opts.max_video).map(|m| Found {
-                    offset: at,
-                    len: m.len,
-                    kind: if &m.brand == b"qt  " {
+                mp4::carve(&mut parse, at, opts.max_video).map(|m| {
+                    let kind = if &m.brand == b"qt  " {
                         Kind::Mov
                     } else {
                         Kind::Mp4
-                    },
-                    status: match m.status {
+                    };
+                    let status = match m.status {
                         mp4::Status::Complete => Status::Complete,
                         mp4::Status::Corrupt { at } => Status::Corrupt { at },
                         mp4::Status::Truncated => Status::Truncated,
-                    },
+                    };
+                    Found::contiguous(at, m.len, kind, status)
                 })
             } else {
                 None
             };
             if let Some(f) = hit {
-                if f.status == Status::Complete {
+                if f.status == Status::Complete && f.fragments.len() == 1 {
                     skip_until = at + f.len;
                 }
                 found.push(f);

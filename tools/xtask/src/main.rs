@@ -148,13 +148,9 @@ fn hakk(image: &Path, out: &Path) -> Result<()> {
     fs::create_dir_all(out)?;
     let src = ImageFile::open(image)?;
     for f in carver::scan::scan(&src, &carver::scan::Options::default()) {
-        let len = usize::try_from(f.len)?;
-        if len == 0 {
+        if f.len == 0 {
             continue;
         }
-        let mut buf = vec![0u8; len];
-        let n = src.read_at(f.offset, &mut buf)?;
-        buf.truncate(n);
         let tag = match f.status {
             carver::Status::Complete => "",
             carver::Status::Corrupt { .. } => "-broken",
@@ -162,7 +158,7 @@ fn hakk(image: &Path, out: &Path) -> Result<()> {
         };
         fs::write(
             out.join(format!("f{:010}{tag}.{}", f.offset, f.kind.extension())),
-            buf,
+            f.read(&src),
         )?;
     }
     Ok(())

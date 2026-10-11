@@ -40,6 +40,16 @@ pub enum Status {
 /// Tries to carve a JPEG starting at `start`. Returns `None` if the bytes there are not a
 /// plausible JPEG header.
 pub fn carve<S: BlockSource + ?Sized>(r: &mut Reader<S>, start: u64, max_len: u64) -> Option<Jpeg> {
+    carve_with_plan(r, start, max_len).map(|(j, _)| j)
+}
+
+/// Like [`carve`], also returning the scan plan of a single-scan baseline JPEG (used to
+/// resume decoding in other places when looking for the next fragment).
+pub(crate) fn carve_with_plan<S: BlockSource + ?Sized>(
+    r: &mut Reader<S>,
+    start: u64,
+    max_len: u64,
+) -> Option<(Jpeg, Option<Plan>)> {
     if r.slice(start, 3)? != [0xFF, 0xD8, 0xFF] {
         return None;
     }
@@ -53,20 +63,29 @@ pub fn carve<S: BlockSource + ?Sized>(r: &mut Reader<S>, start: u64, max_len: u6
         progressive: false,
         verified: true,
         segments: 0,
+        scans: 0,
+        plan: None,
     };
     let (end, status) = p.run();
     if p.segments == 0 {
         return None;
     }
     let (width, height) = p.frame.as_ref().map_or((0, 0), |f| (f.width, f.height));
-    Some(Jpeg {
+    let jpeg = Jpeg {
         len: end - start,
         status,
         width,
         height,
         progressive: p.progressive,
         verified: p.verified && status == Status::Complete,
-    })
+    };
+    // Only a single baseline scan can be resumed elsewhere.
+    let plan = if p.scans == 1 && !p.progressive {
+        p.plan
+    } else {
+        None
+    };
+    Some((jpeg, plan))
 }
 
 struct Component {
@@ -137,10 +156,15 @@ struct Parser<'r, 'a, S: BlockSource + ?Sized> {
     verified: bool,
     /// Header segments seen (zero means this was not a JPEG at all).
     segments: u32,
+    /// Scans started.
+    scans: u32,
+    /// The plan of the last decoded scan.
+    plan: Option<Plan>,
 }
 
 /// Why decoding stopped.
-enum Stop {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stop {
     /// Bad data at this offset.
     Corrupt(u64),
     /// Ran out of data.
@@ -315,28 +339,24 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
             (u64::from(mx) * u64::from(my), per)
         };
 
-        let mut bits = Bits::new(data, self.limit);
-        let mut rst = 0u8;
-        for mcu in 0..mcus {
-            if self.restart > 0 && mcu > 0 && mcu % u64::from(self.restart) == 0 {
-                bits.restart(self.r, rst)?;
-                rst = (rst + 1) % 8;
-            }
-            for (l, &n) in layout.iter().zip(&blocks_per_mcu) {
-                for _ in 0..n {
-                    block(self.r, &mut bits, &l.2, &l.3)?;
-                }
-            }
+        let plan = Plan {
+            layout: layout
+                .into_iter()
+                .zip(blocks_per_mcu)
+                .map(|((_, _, dc, ac), n)| (n, dc, ac))
+                .collect(),
+            mcus,
+            restart: self.restart,
+            data,
+        };
+        self.scans += 1;
+        let outcome = decode(&plan, self.r, Snapshot::start(data), self.limit, None, None);
+        self.plan = Some(plan);
+        match outcome {
+            Outcome::Done(pos) => Ok(pos),
+            Outcome::Fail(stop) => Err(stop),
+            Outcome::Capped => Err(Stop::Truncated),
         }
-        // After the last MCU the scan ends at the next marker, possibly after fill bytes.
-        let mut pos = bits.pos;
-        while self.byte(pos)? == 0xFF && self.byte(pos + 1)? == 0xFF {
-            pos += 1;
-        }
-        if self.byte(pos)? != 0xFF {
-            return Err(Stop::Corrupt(pos));
-        }
-        Ok(pos)
     }
 
     /// Skips entropy-coded data by markers only (for scans we do not decode). Returns where
@@ -366,6 +386,126 @@ enum Next {
     End(u64),
 }
 
+/// A source of bytes by offset: the reader itself, or several fragments spliced together.
+pub(crate) trait Stream {
+    fn byte(&mut self, pos: u64) -> Option<u8>;
+}
+
+impl<S: BlockSource + ?Sized> Stream for Reader<'_, S> {
+    fn byte(&mut self, pos: u64) -> Option<u8> {
+        Reader::byte(self, pos)
+    }
+}
+
+/// What decoding one baseline scan needs.
+#[derive(Clone)]
+pub(crate) struct Plan {
+    /// Per scan component: (blocks per MCU, DC table, AC table).
+    layout: Vec<(u32, Huffman, Huffman)>,
+    pub mcus: u64,
+    restart: u16,
+    /// Offset of the first entropy-coded byte.
+    pub data: u64,
+}
+
+/// Decoder state at the start of an MCU, enough to resume from there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Snapshot {
+    /// Offset of the next byte to load; every byte before it has been consumed.
+    pub pos: u64,
+    acc: u32,
+    count: u32,
+    pub mcu: u64,
+    rst: u8,
+}
+
+impl Plan {
+    /// Whether the scan has restart markers (a strong check when splicing fragments).
+    pub fn has_restart(&self) -> bool {
+        self.restart > 0
+    }
+}
+
+impl Snapshot {
+    pub fn start(data: u64) -> Self {
+        Self {
+            pos: data,
+            acc: 0,
+            count: 0,
+            mcu: 0,
+            rst: 0,
+        }
+    }
+}
+
+pub(crate) enum Outcome {
+    /// Every MCU decoded; the scan ends with a marker at this offset.
+    Done(u64),
+    /// Decoding reached `cap` without errors.
+    Capped,
+    /// Decoding stopped.
+    Fail(Stop),
+}
+
+/// Decodes `plan`'s MCUs from `from` until the end, an error, or `cap` (an offset).
+/// With `snaps`, records the state at every MCU start.
+pub(crate) fn decode<T: Stream + ?Sized>(
+    plan: &Plan,
+    s: &mut T,
+    from: Snapshot,
+    limit: u64,
+    cap: Option<u64>,
+    mut snaps: Option<&mut Vec<Snapshot>>,
+) -> Outcome {
+    let mut bits = Bits {
+        pos: from.pos,
+        acc: from.acc,
+        count: from.count,
+        limit,
+    };
+    let mut rst = from.rst;
+    for mcu in from.mcu..plan.mcus {
+        let snap = Snapshot {
+            pos: bits.pos,
+            acc: bits.acc,
+            count: bits.count,
+            mcu,
+            rst,
+        };
+        if cap.is_some_and(|c| bits.pos >= c) {
+            return Outcome::Capped;
+        }
+        if let Some(v) = snaps.as_deref_mut() {
+            v.push(snap);
+        }
+        let step = (|| {
+            if plan.restart > 0 && mcu > 0 && mcu % u64::from(plan.restart) == 0 {
+                bits.restart(s, rst)?;
+                rst = (rst + 1) % 8;
+            }
+            for (n, dc, ac) in &plan.layout {
+                for _ in 0..*n {
+                    block(s, &mut bits, dc, ac)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(stop) = step {
+            return Outcome::Fail(stop);
+        }
+    }
+    // After the last MCU the scan ends at the next marker, possibly after fill bytes.
+    let mut pos = bits.pos;
+    loop {
+        match (s.byte(pos), s.byte(pos + 1)) {
+            (Some(0xFF), Some(0xFF)) => pos += 1,
+            (Some(0xFF), Some(_)) => return Outcome::Done(pos),
+            (Some(_), _) => return Outcome::Fail(Stop::Corrupt(pos)),
+            (None, _) => return Outcome::Fail(Stop::Truncated),
+        }
+    }
+}
+
 /// Bit reader over entropy-coded data with byte stuffing (F.1.2.3: `FF 00` is `FF`).
 struct Bits {
     /// Offset of the next byte to load.
@@ -376,24 +516,15 @@ struct Bits {
 }
 
 impl Bits {
-    fn new(pos: u64, limit: u64) -> Self {
-        Self {
-            pos,
-            acc: 0,
-            count: 0,
-            limit,
-        }
-    }
-
-    fn bit<S: BlockSource + ?Sized>(&mut self, r: &mut Reader<S>) -> Result<u32, Stop> {
+    fn bit<T: Stream + ?Sized>(&mut self, s: &mut T) -> Result<u32, Stop> {
         if self.count == 0 {
             if self.pos >= self.limit {
                 return Err(Stop::Truncated);
             }
-            let b = r.byte(self.pos).ok_or(Stop::Truncated)?;
+            let b = s.byte(self.pos).ok_or(Stop::Truncated)?;
             if b == 0xFF {
                 // Any marker inside an MCU means the data is broken (or a fragment ended).
-                if r.byte(self.pos + 1).ok_or(Stop::Truncated)? != 0x00 {
+                if s.byte(self.pos + 1).ok_or(Stop::Truncated)? != 0x00 {
                     return Err(Stop::Corrupt(self.pos));
                 }
                 self.pos += 2;
@@ -407,21 +538,17 @@ impl Bits {
         Ok((self.acc >> self.count) & 1)
     }
 
-    fn skip<S: BlockSource + ?Sized>(&mut self, r: &mut Reader<S>, n: u32) -> Result<(), Stop> {
+    fn skip<T: Stream + ?Sized>(&mut self, s: &mut T, n: u32) -> Result<(), Stop> {
         for _ in 0..n {
-            self.bit(r)?;
+            self.bit(s)?;
         }
         Ok(())
     }
 
     /// F.2.2.3 DECODE.
-    fn decode<S: BlockSource + ?Sized>(
-        &mut self,
-        r: &mut Reader<S>,
-        t: &Huffman,
-    ) -> Result<u8, Stop> {
+    fn decode<T: Stream + ?Sized>(&mut self, s: &mut T, t: &Huffman) -> Result<u8, Stop> {
         let at = self.pos;
-        let mut code = self.bit(r)? as i32;
+        let mut code = self.bit(s)? as i32;
         for len in 1..=16usize {
             let max = t.maxcode.get(len).copied().unwrap_or(-1);
             if code <= max {
@@ -430,16 +557,15 @@ impl Bits {
                 let idx = usize::try_from(base + code - min).map_err(|_| Stop::Corrupt(at))?;
                 return t.values.get(idx).copied().ok_or(Stop::Corrupt(at));
             }
-            code = (code << 1) | self.bit(r)? as i32;
+            code = (code << 1) | self.bit(s)? as i32;
         }
         Err(Stop::Corrupt(at))
     }
 
     /// At a restart interval: drop the remaining bits and expect `RSTn` (F.1.2.3, B.2.1).
-    fn restart<S: BlockSource + ?Sized>(&mut self, r: &mut Reader<S>, n: u8) -> Result<(), Stop> {
+    fn restart<T: Stream + ?Sized>(&mut self, s: &mut T, n: u8) -> Result<(), Stop> {
         self.count = 0;
-        let (a, b) = (r.byte(self.pos), r.byte(self.pos + 1));
-        match (a, b) {
+        match (s.byte(self.pos), s.byte(self.pos + 1)) {
             (Some(0xFF), Some(m)) if m == 0xD0 + n => {
                 self.pos += 2;
                 Ok(())
@@ -451,21 +577,21 @@ impl Bits {
 }
 
 /// Decodes one 8x8 block's coefficients without reconstructing them (F.2.2.1-F.2.2.2).
-fn block<S: BlockSource + ?Sized>(
-    r: &mut Reader<S>,
+fn block<T: Stream + ?Sized>(
+    s: &mut T,
     bits: &mut Bits,
     dc: &Huffman,
     ac: &Huffman,
 ) -> Result<(), Stop> {
-    let s = bits.decode(r, dc)?;
-    if s > 11 {
+    let size = bits.decode(s, dc)?;
+    if size > 11 {
         return Err(Stop::Corrupt(bits.pos));
     }
-    bits.skip(r, u32::from(s))?;
+    bits.skip(s, u32::from(size))?;
     let mut k = 1u32;
     while k < 64 {
         let at = bits.pos;
-        let rs = bits.decode(r, ac)?;
+        let rs = bits.decode(s, ac)?;
         let (run, size) = (u32::from(rs >> 4), u32::from(rs & 0x0F));
         if size == 0 {
             if run == 15 {
@@ -478,7 +604,7 @@ fn block<S: BlockSource + ?Sized>(
         if k > 63 || size > 10 {
             return Err(Stop::Corrupt(at));
         }
-        bits.skip(r, size)?;
+        bits.skip(s, size)?;
         k += 1;
     }
     if k > 64 {

@@ -38,12 +38,7 @@ pub fn scan(src: &impl BlockSource, max_len: u64) -> Vec<Found> {
                 && data.get(off..off + SOI.len()) == Some(&SOI)
                 && let Some(len) = find_eoi(src, at, max_len)
             {
-                found.push(Found {
-                    offset: at,
-                    len,
-                    kind: Kind::Jpeg,
-                    status: Status::Complete,
-                });
+                found.push(Found::contiguous(at, len, Kind::Jpeg, Status::Complete));
                 skip_until = at + len;
             }
             off += usize::try_from(ss).unwrap_or(512);
@@ -102,18 +97,8 @@ mod tests {
         assert_eq!(
             found,
             [
-                Found {
-                    offset: 1024,
-                    len: 3000,
-                    kind: Kind::Jpeg,
-                    status: Status::Complete,
-                },
-                Found {
-                    offset: 8192,
-                    len: 5000,
-                    kind: Kind::Jpeg,
-                    status: Status::Complete,
-                },
+                Found::contiguous(1024, 3000, Kind::Jpeg, Status::Complete),
+                Found::contiguous(8192, 5000, Kind::Jpeg, Status::Complete),
             ]
         );
     }
