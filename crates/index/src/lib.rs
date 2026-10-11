@@ -396,7 +396,7 @@ impl Index {
     /// are moved to `into`.
     pub fn merge(&mut self, from: i64, into: i64) -> Result<()> {
         let tx = write(&mut self.conn)?;
-        merge_in(&tx, from, into, true)?;
+        merge_in(&tx, from, into, Copy::PreviewAndStatus)?;
         tx.commit()?;
         Ok(())
     }
@@ -407,7 +407,14 @@ impl Index {
     ///
     /// 1. A carving result at the same start offset as a file system record of the same
     ///    media category (a `.MOV` named file may be carved as MP4) is that file: it is
-    ///    merged into the named record, which takes over the preview information it lacks.
+    ///    merged into the named record, which keeps its name and folder and takes over the
+    ///    preview information it lacks. Where the data is:
+    ///    - If the file system did not know the placement for sure (confidence below
+    ///      High: e.g. a deleted FAT file assumed to be contiguous) and the carver
+    ///      verified a complete file of exactly the recorded size, the carver's extents
+    ///      replace the guessed ones (it reassembled the fragments the guess got wrong).
+    ///    - Otherwise the file system's extents stay. The carver's status is taken only if
+    ///      both describe the same data; a verdict on other bytes says nothing about these.
     /// 2. A carving result lying entirely inside another complete, contiguous carving
     ///    result is part of it (e.g. a JPEG frame inside a video, which parallel carving
     ///    cannot always skip): it is merged into the container, without copying anything.
@@ -435,7 +442,15 @@ impl Index {
             if carved_kind.media() != named_kind.media() {
                 continue;
             }
-            merge_in(&tx, carved, named, true)?;
+            let copy = match placement(&tx, carved, named)? {
+                Placement::Same => Copy::PreviewAndStatus,
+                Placement::TakeCarved(extents) => {
+                    replace_extents(&tx, named, &extents)?;
+                    Copy::PreviewAndStatus
+                }
+                Placement::KeepNamed => Copy::Preview,
+            };
+            merge_in(&tx, carved, named, copy)?;
             last_carved = Some(carved);
             merged.push((carved, named));
         }
@@ -463,7 +478,7 @@ impl Index {
                 && start > cstart
                 && end <= cend
             {
-                merge_in(&tx, id, cid, false)?;
+                merge_in(&tx, id, cid, Copy::Nothing)?;
                 merged.push((id, cid));
                 continue;
             }
@@ -485,9 +500,90 @@ fn write(conn: &mut Connection) -> Result<Transaction<'_>> {
     Ok(conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
 }
 
-/// Merges `from` into `into`; with `copy_preview`, `into` also takes the preview
-/// information (and a known status) it lacks from `from`.
-fn merge_in(tx: &Transaction<'_>, from: i64, into: i64, copy_preview: bool) -> Result<()> {
+/// What a merged record passes on to the record it is merged into.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Copy {
+    Nothing,
+    /// Preview information the target lacks (dimensions, capture time...).
+    Preview,
+    /// Also the verification status, if the target's is unknown.
+    PreviewAndStatus,
+}
+
+/// Which extents a carved record and a file system record for the same file should
+/// end up with.
+enum Placement {
+    /// Both describe the same bytes.
+    Same,
+    /// The file system's placement was a guess; the carver verified a complete file of
+    /// the recorded size elsewhere in places.
+    TakeCarved(Vec<Range<u64>>),
+    KeepNamed,
+}
+
+fn placement(tx: &Transaction<'_>, carved: i64, named: i64) -> Result<Placement> {
+    let carved_extents = extents_in(tx, carved)?;
+    let named_extents = extents_in(tx, named)?;
+    if carved_extents == named_extents {
+        return Ok(Placement::Same);
+    }
+    let (carved_status, carved_size): (i64, i64) = tx.query_row(
+        "SELECT status, size FROM files WHERE id = ?1",
+        [carved],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (named_confidence, named_size): (Option<i64>, i64) = tx.query_row(
+        "SELECT confidence, size FROM files WHERE id = ?1",
+        [named],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let guessed = named_confidence != Some(Confidence::High.code());
+    if guessed && carved_status == Status::Recoverable.code() && carved_size == named_size {
+        Ok(Placement::TakeCarved(carved_extents))
+    } else {
+        Ok(Placement::KeepNamed)
+    }
+}
+
+fn extents_in(tx: &Transaction<'_>, file_id: i64) -> Result<Vec<Range<u64>>> {
+    let mut stmt =
+        tx.prepare_cached("SELECT disk_offset, len FROM extents WHERE file_id = ?1 ORDER BY seq")?;
+    let mut rows = stmt.query([file_id])?;
+    let mut out = Vec::new();
+    while let Some(r) = rows.next()? {
+        let start = from_i64(r.get(0)?)?;
+        out.push(start..start.saturating_add(from_i64(r.get(1)?)?));
+    }
+    Ok(out)
+}
+
+fn replace_extents(tx: &Transaction<'_>, file_id: i64, extents: &[Range<u64>]) -> Result<()> {
+    tx.execute("DELETE FROM extents WHERE file_id = ?1", [file_id])?;
+    let mut stmt = tx.prepare_cached(
+        "INSERT INTO extents (file_id, seq, disk_offset, len) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for (seq, e) in (0i64..).zip(extents) {
+        stmt.execute(params![
+            file_id,
+            seq,
+            to_i64(e.start)?,
+            to_i64(e.end - e.start)?
+        ])?;
+    }
+    // The start does not change (records are paired by it), but keep it in step; this
+    // also bumps the record's revision.
+    tx.execute(
+        "UPDATE files SET disk_offset = ?2 WHERE id = ?1",
+        params![
+            file_id,
+            extents.first().map(|e| to_i64(e.start)).transpose()?
+        ],
+    )?;
+    Ok(())
+}
+
+/// Merges `from` into `into`, passing on what `copy` says.
+fn merge_in(tx: &Transaction<'_>, from: i64, into: i64, copy: Copy) -> Result<()> {
     if from == into {
         return Err(Error::InvalidMerge("cannot merge a file into itself"));
     }
@@ -512,12 +608,12 @@ fn merge_in(tx: &Transaction<'_>, from: i64, into: i64, copy_preview: bool) -> R
         "UPDATE files SET merged_into = ?2 WHERE merged_into = ?1",
         params![from, into],
     )?;
-    if !copy_preview {
+    if copy == Copy::Nothing {
         return Ok(());
     }
     tx.execute(
         "UPDATE files SET \
-           status = CASE WHEN files.status = 0 THEN src.status ELSE files.status END, \
+           status = CASE WHEN files.status = 0 AND ?3 THEN src.status ELSE files.status END, \
            width = ifnull(files.width, src.width), \
            height = ifnull(files.height, src.height), \
            duration_ms = ifnull(files.duration_ms, src.duration_ms), \
@@ -527,7 +623,7 @@ fn merge_in(tx: &Transaction<'_>, from: i64, into: i64, copy_preview: bool) -> R
            thumb_len = ifnull(files.thumb_len, src.thumb_len) \
          FROM (SELECT * FROM files WHERE id = ?1) AS src \
          WHERE files.id = ?2",
-        params![from, into],
+        params![from, into, copy == Copy::PreviewAndStatus],
     )?;
     Ok(())
 }

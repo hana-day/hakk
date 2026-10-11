@@ -471,3 +471,72 @@ fn changes_are_tracked_by_revision() {
     assert_eq!(latest, ix.revision().unwrap());
     assert_eq!(changed(&ix, latest), [] as [i64; 0]);
 }
+
+/// A deleted, fragmented FAT file: the file system can only guess "contiguous", the carver
+/// reassembled the real fragments.
+#[test]
+fn verified_carved_extents_replace_a_guessed_placement() {
+    let guessed = |name: &str, conf, size: u64| {
+        let mut f = named(
+            name,
+            &["DCIM"],
+            FileKind::Jpeg,
+            vec![1 << 20..(1 << 20) + size],
+        );
+        f.confidence = Some(conf);
+        f.deleted = true;
+        f
+    };
+    let carved = |size: u64, extents: Vec<std::ops::Range<u64>>| {
+        let mut c = NewFile::carved(FileKind::Jpeg, 1 << 20, size);
+        c.extents = extents;
+        c.status = Status::Recoverable;
+        c
+    };
+    let real = vec![1 << 20..(1 << 20) + 6000, 9 << 20..(9 << 20) + 4000];
+    let run = |named: NewFile, carved: NewFile| {
+        let mut ix = Index::open_in_memory().unwrap();
+        ix.insert(&[named, carved]).unwrap();
+        assert_eq!(ix.merge_duplicates().unwrap(), [(2, 1)]);
+        let f = ix.file(1).unwrap().unwrap();
+        (f.status, ix.extents(1).unwrap(), f.name, f.offset)
+    };
+
+    // Guessed placement, complete carve of the recorded size: take the carver's extents,
+    // keep the name.
+    let (status, extents, name, offset) = run(
+        guessed("IMG_0026.JPG", Confidence::Low, 10_000),
+        carved(10_000, real.clone()),
+    );
+    assert_eq!(extents, real);
+    assert_eq!(status, Status::Recoverable);
+    assert_eq!(name.as_deref(), Some("IMG_0026.JPG"));
+    assert_eq!(offset, Some(1 << 20));
+
+    // The carve does not add up to the recorded size: a wrong reassembly. Keep the file
+    // system's extents, and do not claim they were verified.
+    let (status, extents, ..) = run(
+        guessed("IMG_0021.JPG", Confidence::Medium, 10_000),
+        carved(
+            9_000,
+            vec![1 << 20..(1 << 20) + 5000, 9 << 20..(9 << 20) + 4000],
+        ),
+    );
+    assert_eq!(extents, [1 << 20..(1 << 20) + 10_000]);
+    assert_eq!(status, Status::Unknown);
+
+    // A known placement (live chain) wins over the carver.
+    let (status, extents, ..) = run(
+        guessed("LIVE.JPG", Confidence::High, 10_000),
+        carved(10_000, real.clone()),
+    );
+    assert_eq!(extents, [1 << 20..(1 << 20) + 10_000]);
+    assert_eq!(status, Status::Unknown);
+
+    // Same bytes: the carver's verdict applies.
+    let (status, ..) = run(
+        guessed("SAME.JPG", Confidence::Low, 10_000),
+        carved(10_000, vec![1 << 20..(1 << 20) + 10_000]),
+    );
+    assert_eq!(status, Status::Recoverable);
+}
