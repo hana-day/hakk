@@ -16,7 +16,7 @@ function file(over: Partial<FoundFile>): FoundFile {
     origin: fsOrigin(['DCIM', '100CANON']),
     offset: 0,
     size: 1000,
-    capturedAt: '2025-08-14T10:00:00',
+    date: { local: '2025-08-14T10:00:00', source: 'capture' },
     durationSeconds: null,
     confidence: 'high',
     status: 'recoverable',
@@ -57,11 +57,11 @@ describe('results', () => {
   });
 
   it('sorts undated files last and groups by day and origin', () => {
-    const a = file({ capturedAt: '2025-08-03T09:00:00' });
-    const b = file({ capturedAt: null, origin: { type: 'carved', namedFromMetadata: false } });
-    const c = file({ capturedAt: '2025-08-14T09:00:00' });
+    const a = file({ date: { local: '2025-08-03T09:00:00', source: 'capture' } });
+    const b = file({ date: null, origin: { type: 'carved', namedFromMetadata: false } });
+    const c = file({ date: { local: '2025-08-14T09:00:00', source: 'capture' } });
     const d = file({
-      capturedAt: '2025-08-14T08:00:00',
+      date: { local: '2025-08-14T08:00:00', source: 'capture' },
       origin: { type: 'carved', namedFromMetadata: true },
     });
     const sorted = sortFiles([a, b, c, d], 'newest');

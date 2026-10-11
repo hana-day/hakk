@@ -75,21 +75,28 @@ export function applyFilters(files: FoundFile[], f: Filters, deep = true): Found
 
 const collator = new Intl.Collator(undefined, { numeric: true });
 
-function byCapture(a: FoundFile, b: FoundFile, dir: 1 | -1): number {
-  // Files without a capture date go last in both directions.
-  if (a.capturedAt === b.capturedAt) return collator.compare(a.name, b.name);
-  if (a.capturedAt === null) return 1;
-  if (b.capturedAt === null) return -1;
-  return a.capturedAt < b.capturedAt ? -dir : dir;
+/** The file's date as an ISO local date-time, whatever its source. */
+export function dateOf(file: FoundFile): string | null {
+  return file.date?.local ?? null;
+}
+
+function byDate(a: FoundFile, b: FoundFile, dir: 1 | -1): number {
+  // Files without a date go last in both directions.
+  const da = dateOf(a);
+  const db = dateOf(b);
+  if (da === db) return collator.compare(a.name, b.name);
+  if (da === null) return 1;
+  if (db === null) return -1;
+  return da < db ? -dir : dir;
 }
 
 export function sortFiles(files: FoundFile[], order: SortOrder): FoundFile[] {
   const out = [...files];
   switch (order) {
     case 'newest':
-      return out.sort((a, b) => byCapture(a, b, -1));
+      return out.sort((a, b) => byDate(a, b, -1));
     case 'oldest':
-      return out.sort((a, b) => byCapture(a, b, 1));
+      return out.sort((a, b) => byDate(a, b, 1));
     case 'name':
       return out.sort((a, b) => collator.compare(a.name, b.name));
     case 'size':
@@ -114,7 +121,7 @@ export interface Group {
 export function groupByDay(sorted: FoundFile[]): Group[] {
   const groups = new Map<string, Group>();
   for (const file of sorted) {
-    const day = file.capturedAt?.slice(0, 10) ?? null;
+    const day = dateOf(file)?.slice(0, 10) ?? null;
     const path = folderPath(file);
     const source: GroupSource =
       path !== null

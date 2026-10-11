@@ -216,6 +216,26 @@ pub enum Confidence {
     Low,
 }
 
+/// Where a file's date comes from. The two can disagree: a file copied onto the drive
+/// carries the copy time in the file system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub enum DateSource {
+    /// Capture time embedded in the file (EXIF, QuickTime metadata).
+    Capture,
+    /// Modification time from the file system entry.
+    FileSystem,
+}
+
+/// Date of a file, as an ISO 8601 local date-time without a time zone
+/// (e.g. `2025-08-14T15:30:22`), since neither EXIF nor FAT records one reliably.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDate {
+    pub local: String,
+    pub source: DateSource,
+}
+
 /// Result of verifying a found file. Updated as verification progresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -259,12 +279,13 @@ pub struct FoundFile {
     pub kind: FileKind,
     pub name: String,
     pub origin: FileOrigin,
-    #[ts(type = "number")]
-    pub offset: u64,
+    /// Where the data starts on the drive. `None` when the location is unknown, e.g. a
+    /// deleted entry whose cluster chain is gone.
+    #[ts(type = "number | null")]
+    pub offset: Option<u64>,
     #[ts(type = "number")]
     pub size: u64,
-    /// Capture time from embedded metadata, as an ISO 8601 local date-time.
-    pub captured_at: Option<String>,
+    pub date: Option<FileDate>,
     /// Length of a video.
     pub duration_seconds: Option<u32>,
     pub confidence: Confidence,

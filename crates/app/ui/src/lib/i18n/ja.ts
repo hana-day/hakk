@@ -146,6 +146,7 @@ export const ja = {
     status: '状態',
     actions: '操作',
     unknownDate: '不明',
+    fileDate: '{date}（ファイルの日付）',
     noDuration: '—',
   },
   status: {

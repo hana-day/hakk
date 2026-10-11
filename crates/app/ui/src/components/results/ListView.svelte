@@ -72,7 +72,11 @@
               <span class="num mono">{displayName(f)}</span>
             </span>
           </td>
-          <td class="date">{f.capturedAt === null ? t('list.unknownDate') : formatDateTime(f.capturedAt)}</td>
+          <td class="date">
+            {#if f.date === null}{t('list.unknownDate')}
+            {:else if f.date.source === 'fileSystem'}{t('list.fileDate', { date: formatDateTime(f.date.local) })}
+            {:else}{formatDateTime(f.date.local)}{/if}
+          </td>
           <td class="num mono">{f.durationSeconds === null ? t('list.noDuration') : formatClock(f.durationSeconds)}</td>
           <td class="num mono right">{formatBytes(f.size)}</td>
           <td><span class={badge.className}>{badge.text}</span></td>

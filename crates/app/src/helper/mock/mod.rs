@@ -486,7 +486,10 @@ impl Sim {
         let carved = found
             .iter()
             .filter(|f| matches!(f.origin, hakk_protocol::FileOrigin::Carved { .. }));
-        for cell in carved.map(|f| cell_of(f.offset, total)) {
+        for cell in carved
+            .filter_map(|f| f.offset)
+            .map(|offset| cell_of(offset, total))
+        {
             if let Some(slot) = scan.found_cells.get_mut(cell as usize) {
                 *slot = true;
             }
@@ -633,9 +636,9 @@ impl Scan {
             kind: plan.kind,
             name: plan.name.clone(),
             origin: plan.origin.clone(),
-            offset: plan.offset,
+            offset: Some(plan.offset),
             size: plan.size,
-            captured_at: plan.captured_at.clone(),
+            date: plan.date.clone(),
             duration_seconds: plan.duration_seconds,
             confidence: plan.confidence,
             status: FileStatus::Unknown,

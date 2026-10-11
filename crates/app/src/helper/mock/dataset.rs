@@ -6,8 +6,9 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use hakk_protocol::{
-    Confidence, Destination, DestinationBlock, DestinationId, Drive, DriveId, DriveKind,
-    DriveWarning, FileKind, FileOrigin, FileStatus, HiddenReason, RepairMethod, VolumeRef,
+    Confidence, DateSource, Destination, DestinationBlock, DestinationId, Drive, DriveId,
+    DriveKind, DriveWarning, FileDate, FileKind, FileOrigin, FileStatus, HiddenReason,
+    RepairMethod, VolumeRef,
 };
 
 const GB: u64 = 1_000_000_000;
@@ -288,7 +289,7 @@ pub struct PlannedFile {
     pub origin: FileOrigin,
     pub offset: u64,
     pub size: u64,
-    pub captured_at: Option<String>,
+    pub date: Option<FileDate>,
     pub duration_seconds: Option<u32>,
     pub confidence: Confidence,
     pub hidden: Option<HiddenReason>,
@@ -369,7 +370,16 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
                 confidence: confidence_for(status),
                 offset,
                 size,
-                captured_at: Some(datetime(day, seconds)),
+                // Overwritten files have no readable embedded metadata; only the file
+                // system date is left.
+                date: Some(FileDate {
+                    local: datetime(day, seconds),
+                    source: if status == FileStatus::PartiallyDamaged {
+                        DateSource::FileSystem
+                    } else {
+                        DateSource::Capture
+                    },
+                }),
                 duration_seconds: duration,
                 hidden: None,
                 reveal: Reveal::FileSystem(f64::from(fs_index) / f64::from(fs_count.max(1))),
@@ -451,7 +461,10 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
                 start + rng.range(0, len)
             },
             size,
-            captured_at: named.then(|| datetime(day, seconds)),
+            date: named.then(|| FileDate {
+                local: datetime(day, seconds),
+                source: DateSource::Capture,
+            }),
             duration_seconds: duration,
             hidden,
             reveal: Reveal::Carving,
@@ -480,7 +493,7 @@ pub fn plan(drive: &MockDrive) -> Vec<PlannedFile> {
             reveal: Reveal::Carving,
             verify_delay: 1.5,
             duplicate_of: Some(of),
-            captured_at: None,
+            date: None,
             ..original.clone()
         });
     }
