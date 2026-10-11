@@ -153,6 +153,7 @@ fn default_align() -> Size {
 pub enum ContentKind {
     Jpeg,
     Mp4,
+    Heic,
 }
 
 impl Scenario {
@@ -177,6 +178,7 @@ impl Scenario {
             let known = match kind {
                 ContentKind::Jpeg => self.profiles.jpeg.contains_key(name),
                 ContentKind::Mp4 => self.profiles.video.contains_key(name),
+                ContentKind::Heic => self.profiles.heif.contains_key(name),
             };
             if !known {
                 bail!("steps[{i}]: unknown {kind:?} profile {name:?}");

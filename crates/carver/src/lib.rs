@@ -1,12 +1,13 @@
 //! Carving: finding and extracting files from raw data without the file system.
 //!
 //! - [`scan`]: walks a whole source and finds JPEG and MP4/QuickTime files
-//! - [`jpeg`], [`mp4`]: structure-aware carvers for one file at a known offset
+//! - [`jpeg`], [`mp4`], [`heif`]: structure-aware carvers for one file at a known offset
 //! - [`fragments`]: reassembles fragmented JPEGs by resuming the decoder elsewhere
 //! - [`naive`]: the minimal baseline (SOI to the first EOI), kept for comparison
 //! - [`reader`]: a windowed reader over a [`blocksource::BlockSource`]
 
 pub mod fragments;
+pub mod heif;
 pub mod jpeg;
 pub mod mp4;
 pub mod naive;
@@ -65,6 +66,7 @@ pub enum Kind {
     Jpeg,
     Mp4,
     Mov,
+    Heic,
 }
 
 impl Kind {
@@ -73,6 +75,7 @@ impl Kind {
             Kind::Jpeg => "jpg",
             Kind::Mp4 => "mp4",
             Kind::Mov => "mov",
+            Kind::Heic => "heic",
         }
     }
 }

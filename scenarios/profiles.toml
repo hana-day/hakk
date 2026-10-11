@@ -235,3 +235,18 @@ video_per_chunk = 1
 audio_per_chunk = 1
 co64 = true
 metadata_tracks = 1
+
+# --- HEIC -------------------------------------------------------------------
+
+# iPad 7th gen (iPadOS 18): ftyp heic, meta (35 hidden 512x512 HEVC tiles, a grid as the
+# primary item with its descriptor in idat, a 320x240 HEVC thumbnail, EXIF), then mdat with
+# EXIF, thumbnail and tiles in that order.
+[heif.ipad]
+make = "Apple"
+model = "iPad (7th generation)"
+dir = "DCIM/100APPLE"
+name = "IMG_{n}.HEIC"
+aspect = [4, 3]
+tile = 512
+exif_len = [2100, 2200]
+thumbnail = [7000, 8000]

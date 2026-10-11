@@ -107,6 +107,7 @@ fn to_new_file(f: Found) -> NewFile {
         carver::Kind::Jpeg => FileKind::Jpeg,
         carver::Kind::Mp4 => FileKind::Mp4,
         carver::Kind::Mov => FileKind::Mov,
+        carver::Kind::Heic => FileKind::Heic,
     };
     let mut file = NewFile::carved(kind, f.offset, f.len);
     file.extents = f

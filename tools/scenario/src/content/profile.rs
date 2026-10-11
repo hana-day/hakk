@@ -16,6 +16,31 @@ pub struct Profiles {
     pub jpeg: BTreeMap<String, JpegProfile>,
     #[serde(default)]
     pub video: BTreeMap<String, VideoProfile>,
+    #[serde(default)]
+    pub heif: BTreeMap<String, HeifProfile>,
+}
+
+/// A HEIC photo: a grid of HEVC tiles with a thumbnail and EXIF (iPhone / iPad).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeifProfile {
+    pub make: String,
+    pub model: String,
+    pub dir: String,
+    pub name: String,
+    #[serde(default = "default_aspect")]
+    pub aspect: [u32; 2],
+    /// Tile size in pixels (512 on Apple devices).
+    #[serde(default = "default_tile")]
+    pub tile: u32,
+    /// Size of the EXIF item.
+    pub exif_len: Range,
+    /// Size of the HEVC thumbnail.
+    pub thumbnail: Range,
+}
+
+fn default_tile() -> u32 {
+    512
 }
 
 /// An inclusive `[min, max]` range.

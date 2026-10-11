@@ -118,6 +118,14 @@ min_size = "6MiB"
 max_size = "12MiB"
 
 [[steps]]
+op = "write"
+kind = "heic"
+profile = "ipad"
+count = 6
+min_size = "500KiB"
+max_size = "2MiB"
+
+[[steps]]
 op = "delete"
 fraction = 0.5
 

@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, fragments, jpeg, mp4, reader::Reader};
+use crate::{Found, Kind, Status, fragments, heif, jpeg, mp4, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -80,7 +80,7 @@ pub fn looks_like_header(head: &[u8]) -> bool {
 }
 
 /// Carves the file starting at `at`, if any: a JPEG (reassembled if fragmented and
-/// `opts.reassemble` is set) or an MP4/QuickTime file. This is what [`scan`] does at each
+/// `opts.reassemble` is set), a HEIC image or an MP4/QuickTime file. This is what [`scan`] does at each
 /// header it finds, for callers that drive the reading themselves.
 pub fn carve_at<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
@@ -114,6 +114,15 @@ pub fn carve_at<S: BlockSource + ?Sized>(
             found.height = Some(u32::from(j.height));
         }
         return Some(found);
+    }
+    if head.get(4..8) == Some(b"ftyp") && heif::is_heif(r, at).is_some() {
+        let h = heif::carve(r, at, opts.max_jpeg)?;
+        let status = match h.status {
+            heif::Status::Complete => Status::Complete,
+            heif::Status::Corrupt { at } => Status::Corrupt { at },
+            heif::Status::Truncated => Status::Truncated,
+        };
+        return Some(Found::contiguous(at, h.len, Kind::Heic, status));
     }
     if head.get(4..8) == Some(b"ftyp") {
         let m = mp4::carve(r, at, opts.max_video)?;

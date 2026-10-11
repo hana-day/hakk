@@ -4,6 +4,7 @@
 //! found by matching content. Compressed data and samples are therefore random bytes.
 
 mod exif;
+mod heif;
 mod jpeg;
 pub(crate) mod mp4;
 mod picture;
@@ -58,6 +59,11 @@ pub fn generate(
             Some(p) => Ok(mp4::generate_profiled(p, target, rng)),
             None => bail!("no video profile named {name:?}"),
         },
+        (ContentKind::Heic, Some(name)) => match profiles.heif.get(name) {
+            Some(p) => Ok(heif::generate_profiled(p, target, rng)),
+            None => bail!("no heif profile named {name:?}"),
+        },
+        (ContentKind::Heic, None) => bail!("heic files need a heif profile"),
     }
 }
 
@@ -81,6 +87,11 @@ pub fn path(
             .get(name)
             .map(|p| (p.dir.as_str(), p.name.as_str()))
             .unzip(),
+        (ContentKind::Heic, Some(name)) => profiles
+            .heif
+            .get(name)
+            .map(|p| (p.dir.as_str(), p.name.as_str()))
+            .unzip(),
         _ => (None, None),
     };
     let dir = dir.or(pdir).unwrap_or("DCIM/100HAKK");
@@ -95,5 +106,6 @@ pub fn extension(kind: ContentKind) -> &'static str {
     match kind {
         ContentKind::Jpeg => "JPG",
         ContentKind::Mp4 => "MP4",
+        ContentKind::Heic => "HEIC",
     }
 }
