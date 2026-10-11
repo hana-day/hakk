@@ -38,13 +38,16 @@ use index::{Index, Query};
 use scan::{Analyzer, Event, Outcome, Scan, ScanHandle};
 
 /// Builds the analyzers for each new scan (they keep per-scan state).
-pub type AnalyzerFactory = Arc<dyn Fn() -> Vec<Arc<dyn Analyzer>> + Send + Sync>;
+pub type AnalyzerFactory = Arc<dyn Fn() -> Vec<Box<dyn Analyzer>> + Send + Sync>;
 
 /// Lists destinations; the argument is the scanned device when it is a physical disk.
 type PlaceLister = Box<dyn Fn(Option<&Path>) -> Vec<Destination> + Send + Sync>;
 
-/// How often the index is read for new and changed files.
+/// How often the index is read for new and merged files.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How often every shown record is re-read for status changes; this grows with the number
+/// of files, so it runs less often than the poll for new ones.
+const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct RealHelper {
     shared: Arc<Shared>,
@@ -82,9 +85,14 @@ struct ActiveScan {
 }
 
 impl RealHelper {
+    /// A helper that scans with the file system and carving analyzers.
+    pub fn new(sink: EventSink) -> Self {
+        Self::with_analyzers(sink, Arc::new(scan::analyzers::default_set))
+    }
+
     /// `analyzers` builds the analyzers for each scan. Indexes go into a `hakk` folder in
     /// the system's temporary directory.
-    pub fn new(sink: EventSink, analyzers: AnalyzerFactory) -> Self {
+    pub fn with_analyzers(sink: EventSink, analyzers: AnalyzerFactory) -> Self {
         Self::with_options(
             sink,
             analyzers,
@@ -221,11 +229,13 @@ impl Helper for RealHelper {
             let _ = std::fs::remove_file(format!("{}{suffix}", index_path.display()));
         }
         let index = Index::open(&index_path).map_err(internal)?;
-        let mut builder = Scan::new(source.clone()).label(label);
-        for analyzer in (self.shared.analyzers)() {
-            builder = builder.analyzer(analyzer);
-        }
-        let handle = Arc::new(builder.start(index).map_err(internal)?);
+        let handle = Arc::new(
+            Scan::new(source.clone())
+                .label(label)
+                .analyzers((self.shared.analyzers)())
+                .start(index)
+                .map_err(internal)?,
+        );
         let ended = Arc::new(AtomicBool::new(false));
 
         let pump = Pump {
@@ -348,7 +358,7 @@ impl Pump {
                     eprintln!("analyzer {analyzer} panicked at {offset:?}; scanning continues");
                 }
                 Ok(Event::Finished(summary)) => {
-                    self.poll();
+                    self.poll(true);
                     self.ended.store(true, Ordering::Release);
                     let report = self.poller.summary(
                         self.scan_id,
@@ -367,15 +377,15 @@ impl Pump {
                 }
             }
             if Instant::now() >= next_poll {
-                self.poll();
+                self.poll(false);
                 next_poll = Instant::now() + POLL_INTERVAL;
             }
         }
     }
 
-    fn poll(&mut self) {
+    fn poll(&mut self, full: bool) {
         let scan_id = self.scan_id;
-        match self.poller.poll() {
+        match self.poller.poll(full) {
             Ok(changes) => {
                 if !changes.found.is_empty() {
                     self.shared.emit(HelperEvent::FilesFound(FilesFound {
@@ -413,6 +423,9 @@ struct Changes {
 struct Poller {
     path: PathBuf,
     index: Option<Index>,
+    /// Highest record id seen so far; newer records are new files.
+    last_id: i64,
+    next_status_check: Instant,
     /// Every record seen so far, as last reported.
     known: HashMap<i64, Known>,
     folders: HashMap<i64, Vec<String>>,
@@ -428,66 +441,82 @@ impl Poller {
         Self {
             path,
             index: None,
+            last_id: 0,
+            next_status_check: Instant::now(),
             known: HashMap::new(),
             folders: HashMap::new(),
         }
     }
 
-    fn poll(&mut self) -> Result<Changes, index::Error> {
+    /// `full` re-reads every record for status changes regardless of the interval.
+    fn poll(&mut self, full: bool) -> Result<Changes, index::Error> {
         if self.index.is_none() {
             self.index = Some(Index::open(&self.path)?);
         }
         let Some(index) = self.index.as_mut() else {
             return Ok(Changes::default());
         };
-        // Fold carving results into the named records they duplicate, so the merge shows
-        // up while scanning. Cheap and idempotent. It writes while the scan also writes, so
-        // it can lose a race for the lock; it is simply retried on the next poll.
-        let _ = index.merge_duplicates();
-        let records = index.files(&Query {
+        let mut changes = Changes::default();
+
+        // New records, including ones already merged (remembered, not shown).
+        let new = index.files(&Query {
+            after_id: Some(self.last_id),
             include_merged: true,
             ..Query::default()
         })?;
-        let mut changes = Changes::default();
-        for record in records {
-            match self.known.get_mut(&record.id) {
-                None => {
-                    let folders = match record.folder_id {
-                        Some(id) => match self.folders.get(&id) {
-                            Some(path) => path.clone(),
-                            None => {
-                                let path = index.folder_path(id)?;
-                                self.folders.insert(id, path.clone());
-                                path
-                            }
-                        },
-                        None => Vec::new(),
-                    };
-                    let file = convert::found_file(&record, folders);
-                    let merged = record.merged_into.is_some();
-                    if !merged {
-                        changes.found.push(file.clone());
+        for record in new {
+            self.last_id = self.last_id.max(record.id);
+            let folders = match record.folder_id {
+                Some(id) => match self.folders.get(&id) {
+                    Some(path) => path.clone(),
+                    None => {
+                        let path = index.folder_path(id)?;
+                        self.folders.insert(id, path.clone());
+                        path
                     }
-                    self.known.insert(record.id, Known { file, merged });
+                },
+                None => Vec::new(),
+            };
+            let file = convert::found_file(&record, folders);
+            let merged = record.merged_into.is_some();
+            if !merged {
+                changes.found.push(file.clone());
+            }
+            self.known.insert(record.id, Known { file, merged });
+        }
+
+        // Fold carving results into the named records they duplicate, so the merge shows
+        // up while scanning. It writes while the scan also writes; if it loses the race
+        // for the lock it is simply retried on the next poll.
+        if let Ok(pairs) = index.merge_duplicates() {
+            for (from, into) in pairs {
+                if let Some(known) = self.known.get_mut(&from)
+                    && !known.merged
+                {
+                    known.merged = true;
+                    changes.merges.push(FileMerge {
+                        from: known.file.id,
+                        into: hakk_protocol::FileId(u64::try_from(into).unwrap_or(0)),
+                    });
                 }
-                Some(known) => {
-                    if let (Some(into), false) = (record.merged_into, known.merged) {
-                        known.merged = true;
-                        changes.merges.push(FileMerge {
-                            from: known.file.id,
-                            into: hakk_protocol::FileId(u64::try_from(into).unwrap_or(0)),
-                        });
-                        continue;
-                    }
-                    let status = convert::status(record.status);
-                    if status != known.file.status && !known.merged {
-                        known.file.status = status;
-                        changes.updates.push(FileUpdate {
-                            id: known.file.id,
-                            status,
-                            repair: known.file.repair,
-                        });
-                    }
+            }
+        }
+
+        // Verification results for records already shown.
+        if full || Instant::now() >= self.next_status_check {
+            self.next_status_check = Instant::now() + STATUS_INTERVAL;
+            for record in index.files(&Query::default())? {
+                let Some(known) = self.known.get_mut(&record.id) else {
+                    continue;
+                };
+                let status = convert::status(record.status);
+                if status != known.file.status && !known.merged {
+                    known.file.status = status;
+                    changes.updates.push(FileUpdate {
+                        id: known.file.id,
+                        status,
+                        repair: known.file.repair,
+                    });
                 }
             }
         }

@@ -71,7 +71,7 @@ fn harness() -> Harness {
         Box::new(move |e| {
             let _ = tx.lock().unwrap().send(e);
         }),
-        Arc::new(|| vec![Arc::new(SoiFinder) as Arc<dyn Analyzer>]),
+        Arc::new(|| vec![Box::new(SoiFinder) as Box<dyn Analyzer>]),
         dir.path().join("work"),
         Box::new(move |_| {
             vec![Destination {
@@ -197,4 +197,103 @@ fn refuses_unknown_drives_and_destinations() {
         h.helper.open_image("/no/such/image.img"),
         Err(HelperError::CannotOpen { .. })
     ));
+}
+
+/// Scans a scenario image with the real analyzers, recovers everything found, and checks
+/// the copies against the scenario's manifest. Run with
+/// `HAKK_SCENARIO=work/<scenario> cargo test -p hakk-helper -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a scenario image (HAKK_SCENARIO)"]
+fn recovers_a_scenario_image() {
+    use sha2::{Digest, Sha256};
+    use std::collections::HashSet;
+
+    let dir = PathBuf::from(std::env::var("HAKK_SCENARIO").expect("HAKK_SCENARIO is not set"));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    let dest_path = dest.path().to_string_lossy().into_owned();
+    let (tx, events) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    let helper = RealHelper::with_options(
+        Box::new(move |e| {
+            let _ = tx.lock().unwrap().send(e);
+        }),
+        Arc::new(scan::analyzers::default_set),
+        work.path().to_path_buf(),
+        Box::new(move |_| {
+            vec![Destination {
+                id: DestinationId("test".into()),
+                kind: hakk_protocol::DriveKind::Folder,
+                name: "test".into(),
+                path: dest_path.clone(),
+                free_bytes: 1 << 40,
+                blocked: None,
+            }]
+        }),
+    );
+    let drive = helper
+        .open_image(&dir.join("image.img").to_string_lossy())
+        .unwrap();
+    let scan_id = helper.start_scan(&drive.id).unwrap();
+    let seen = until(&events, |e| matches!(e, HelperEvent::ScanFinished(_)));
+    let mut shown = HashMap::new();
+    for e in &seen {
+        match e {
+            HelperEvent::FilesFound(f) => shown.extend(f.files.iter().map(|f| (f.id, f.clone()))),
+            HelperEvent::FilesMerged(m) => m.merges.iter().for_each(|m| {
+                shown.remove(&m.from);
+            }),
+            _ => {}
+        }
+    }
+    helper
+        .recover(RecoveryRequest {
+            scan_id,
+            files: shown.keys().copied().collect(),
+            destination: DestinationId("test".into()),
+        })
+        .unwrap();
+    until(&events, |e| matches!(e, HelperEvent::RecoveryFinished(_)));
+
+    let mut recovered = HashSet::new();
+    for day in std::fs::read_dir(dest.path()).unwrap().flatten() {
+        for file in std::fs::read_dir(day.path()).unwrap().flatten() {
+            let digest = Sha256::digest(std::fs::read(file.path()).unwrap());
+            recovered.insert(
+                digest
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>(),
+            );
+        }
+    }
+    let files = manifest["files"].as_array().unwrap();
+    let intact: Vec<_> = files
+        .iter()
+        .filter(|f| f["intact_bytes"] == f["size"])
+        .collect();
+    let matched = intact
+        .iter()
+        .filter(|f| recovered.contains(f["sha256"].as_str().unwrap()))
+        .count();
+    let named = shown
+        .values()
+        .filter(|f| matches!(f.origin, FileOrigin::FileSystem { .. }))
+        .count();
+    println!(
+        "manifest: {} files, {} intact; shown: {} ({} named); recovered intact: {matched}/{}",
+        files.len(),
+        intact.len(),
+        shown.len(),
+        named,
+        intact.len()
+    );
+    for f in &intact {
+        if !recovered.contains(f["sha256"].as_str().unwrap()) {
+            println!("  missing: {} ({} bytes)", f["path"], f["size"]);
+        }
+    }
+    assert!(matched > 0, "nothing recovered intact");
 }

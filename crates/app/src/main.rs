@@ -6,8 +6,6 @@
 mod commands;
 mod helper;
 
-use std::sync::Arc;
-
 use hakk_helper::RealHelper;
 use hakk_protocol::{EventSink, Helper};
 use tauri::{Emitter, Manager};
@@ -44,9 +42,7 @@ fn helper(sink: EventSink) -> Box<dyn Helper> {
     if std::env::var(HELPER_ENV).is_ok_and(|v| v == "mock") {
         return Box::new(MockHelper::new(sink, mock_config()));
     }
-    // The file system and carving analyzers are being added to the scan crate; until then
-    // scans read the disk and report progress but find nothing.
-    let helper = RealHelper::new(sink, Arc::new(Vec::new));
+    let helper = RealHelper::new(sink);
     if let Some(paths) = std::env::var_os(OPEN_IMAGE_ENV) {
         for path in std::env::split_paths(&paths) {
             if let Err(err) = helper.open_image(&path.to_string_lossy()) {
