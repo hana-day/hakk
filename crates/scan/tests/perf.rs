@@ -399,3 +399,117 @@ fn imprecise_errors_are_narrowed_down_to_the_bad_sectors() {
     // per sector (2048 per MiB).
     assert!(failed < 100, "{failed} failed reads");
 }
+
+/// Reads through [`scan::Context::source`] like a pull parser: from every block start that
+/// is a multiple of `every`, `ahead` bytes forward (past the block), and `behind` bytes
+/// back into the previous blocks. Checks the bytes against the expected data.
+struct Follows {
+    every: u64,
+    ahead: u64,
+    behind: u64,
+    expected: Arc<Vec<u8>>,
+    mismatches: std::sync::Mutex<usize>,
+}
+
+impl scan::Analyzer for Follows {
+    fn name(&self) -> &str {
+        "follows"
+    }
+
+    fn block(&self, block: &scan::Block, cx: &mut scan::Context<'_>) {
+        if !block.offset().is_multiple_of(self.every) {
+            return;
+        }
+        let src = cx.source();
+        let len = src.len();
+        let ranges = [
+            block.offset()..(block.offset() + self.ahead).min(len),
+            block.offset().saturating_sub(self.behind)..block.offset(),
+        ];
+        for r in ranges {
+            if r.is_empty() {
+                continue;
+            }
+            let mut buf = vec![0u8; (r.end - r.start) as usize];
+            src.read_exact_at(r.start, &mut buf).unwrap();
+            if buf[..] != self.expected[r.start as usize..r.end as usize] {
+                *self.mismatches.lock().unwrap() += 1;
+            }
+        }
+    }
+}
+
+#[test]
+fn following_a_file_past_its_block_costs_no_seek_and_no_second_read() {
+    let len = 64 * MIB;
+    let data = filler(len as usize, 3);
+    let disk = hdd(data.clone());
+    let follows = Arc::new(Follows {
+        every: 4 * MIB,
+        ahead: 3 * MIB + 12345, // a 3 MiB photo starting at the block
+        behind: 2 * MIB,        // and something reaching back
+        expected: Arc::new(data),
+        mismatches: std::sync::Mutex::new(0),
+    });
+    let handle = Scan::new(disk.clone())
+        .analyzer(follows.clone())
+        .block_size(BLOCK)
+        .workers(3)
+        .start(MemStore::new())
+        .unwrap();
+    let (summary, _) = finish(handle);
+    assert_eq!(summary.outcome, Outcome::Completed);
+    assert_eq!(*follows.mismatches.lock().unwrap(), 0);
+    assert_eq!(disk.seeks(), 0);
+    assert_eq!(
+        disk.bytes_read(),
+        len,
+        "served from the main pass, not read twice"
+    );
+}
+
+/// Reads "metadata" at the end of the disk from `start` through the blocking source.
+struct MetaAtEnd;
+
+impl scan::Analyzer for MetaAtEnd {
+    fn name(&self) -> &str {
+        "meta-at-end"
+    }
+
+    fn start(&self, cx: &mut scan::Context<'_>) {
+        let src = cx.source();
+        let mut buf = vec![0u8; 64 << 10];
+        for i in 0..8 {
+            src.read_exact_at(src.len() - MIB + i * (64 << 10), &mut buf)
+                .unwrap();
+        }
+    }
+
+    fn block(&self, _block: &scan::Block, _cx: &mut scan::Context<'_>) {}
+}
+
+#[test]
+fn metadata_read_in_start_comes_before_the_main_pass() {
+    let len = 64 * MIB;
+    let disk = hdd(vec![0; len as usize]);
+    // Metadata further away than the read-ahead allowance is read directly (closer
+    // metadata is reached by reading the main pass forward instead).
+    let handle = Scan::new(disk.clone())
+        .analyzer(MetaAtEnd)
+        .block_size(BLOCK)
+        .read_cache(8 * MIB)
+        .start(MemStore::new())
+        .unwrap();
+    let (summary, events) = finish(handle);
+    assert_eq!(summary.outcome, Outcome::Completed);
+    let log = disk.log();
+    // All eight metadata reads first, then the main pass from the start.
+    assert!(log[..8].iter().all(|r| r.offset >= len - MIB));
+    assert_eq!(log[8].offset, 0);
+    assert_eq!(disk.seeks(), 2, "out to the metadata and back, once");
+    let first = events.iter().find_map(|e| match e {
+        Event::Progress(p) => Some(p.phase),
+        _ => None,
+    });
+    assert_eq!(first, Some(Phase::Metadata));
+}

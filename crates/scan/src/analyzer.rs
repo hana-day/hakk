@@ -2,6 +2,8 @@
 
 use std::ops::Range;
 
+use blocksource::BlockSource;
+
 use crate::Finding;
 
 /// Something that looks at the disk data as the scan reads it and reports files.
@@ -26,10 +28,16 @@ use crate::Finding;
 /// # Reading more
 ///
 /// For anything else (file system metadata before the scan reaches it, following a
-/// structure past the lookahead, a fragment elsewhere), request a read with
-/// [`Context::read`]. The data arrives later in [`Analyzer::read_done`]. All reads,
-/// including these, are ordered by the scan's single reader thread, so analyzers never
-/// cause the disk head to wander on their own.
+/// structure past the lookahead, a fragment elsewhere) there are two ways, and both go
+/// through the scan's single reader thread, so analyzers never move the disk head on
+/// their own:
+///
+/// - [`Context::source`]: a blocking [`BlockSource`] for parsers that pull data as they
+///   go. Data the main pass read recently comes from memory; data a little ahead is
+///   served by moving the main pass forward to it (so following a file that continues
+///   past the block costs no seek). Only reads elsewhere touch the disk out of order.
+/// - [`Context::read`]: an asynchronous request, answered later in
+///   [`Analyzer::read_done`], for reads that can wait (e.g. until after the main pass).
 pub trait Analyzer: Send + Sync {
     /// Short name for logs and error reports.
     fn name(&self) -> &str;
@@ -40,8 +48,10 @@ pub trait Analyzer: Send + Sync {
         0
     }
 
-    /// Called once before the scan starts (also when resuming), e.g. to request the file
-    /// system metadata with [`Priority::Immediate`] so named files appear first.
+    /// Called once before the main pass (also when resuming), on a worker thread. The main
+    /// pass waits until every analyzer's `start` returns, so this is the place to read
+    /// file system metadata through [`Context::source`]: named files appear first, and
+    /// the metadata reads are not interleaved with the main pass.
     fn start(&self, cx: &mut Context<'_>) {
         let _ = cx;
     }
@@ -152,15 +162,24 @@ pub struct ReadReply {
 }
 
 /// What an analyzer can do from inside a callback: report files and request reads.
-#[derive(Debug)]
 pub struct Context<'a> {
+    pub(crate) source: &'a dyn BlockSource,
     pub(crate) found: &'a mut Vec<Finding>,
     pub(crate) requests: &'a mut Vec<ReadRequest>,
     pub(crate) source_len: u64,
     pub(crate) sector_size: u32,
 }
 
-impl Context<'_> {
+impl std::fmt::Debug for Context<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("found", &self.found.len())
+            .field("requests", &self.requests.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> Context<'a> {
     /// Reports a file. Only its location is stored; re-reporting the same file is
     /// harmless (the index ignores duplicates).
     pub fn report(&mut self, file: Finding) {
@@ -174,6 +193,13 @@ impl Context<'_> {
             priority,
             tag,
         });
+    }
+
+    /// A blocking reader over the scanned disk whose reads are ordered by the scan (see
+    /// [`Analyzer`]). Reads covering a range recorded as bad fail without touching the
+    /// disk. After the scan is cancelled every read fails.
+    pub fn source(&self) -> &'a dyn BlockSource {
+        self.source
     }
 
     pub fn source_len(&self) -> u64 {

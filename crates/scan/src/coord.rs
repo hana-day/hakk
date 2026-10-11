@@ -23,6 +23,7 @@ use crate::{
         RunState, Summary,
     },
     ranges::{RangeMap, RangeSet},
+    source::ScanSource,
     store::{Store, StoreError},
     worker::Analyzers,
 };
@@ -36,6 +37,8 @@ pub(crate) struct CoordConfig {
     pub(crate) source_len: u64,
     pub(crate) sector_size: u32,
     pub(crate) retry_passes: u32,
+    /// For analyzers' `finish` (the reader is gone by then, so it reads directly).
+    pub(crate) source: ScanSource,
 }
 
 /// A block whose analysis (including reads it led to) is not finished yet.
@@ -81,7 +84,6 @@ pub(crate) struct CoordInit {
     pub(crate) bad: RangeMap<u32>,
     pub(crate) retry_passes: u32,
     pub(crate) known_files: Vec<(Option<u64>, Media)>,
-    pub(crate) initial_findings: Vec<Finding>,
     pub(crate) map_cells: usize,
 }
 
@@ -117,7 +119,7 @@ impl Coordinator {
             count(&mut found, media);
         }
         let now = clock.now();
-        let mut c = Self {
+        Self {
             cfg,
             rx,
             events,
@@ -144,9 +146,7 @@ impl Coordinator {
             last_checkpoint: now,
             outcome: None,
             error: None,
-        };
-        c.add_findings(init.initial_findings);
-        c
+        }
     }
 
     pub(crate) fn run(mut self) -> Result<Summary, ScanError> {
@@ -343,6 +343,7 @@ impl Coordinator {
             let mut ignored = Vec::new();
             for a in self.analyzers.iter() {
                 let mut cx = Context {
+                    source: &self.cfg.source,
                     found: &mut found,
                     requests: &mut ignored,
                     source_len: self.cfg.source_len,

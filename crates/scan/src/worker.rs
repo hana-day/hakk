@@ -15,6 +15,7 @@ use crate::{
     Finding,
     analyzer::{Analyzer, Context, ReadRequest},
     msg::{CoordMsg, Job, ToReader},
+    source::ScanSource,
 };
 
 pub(crate) type Analyzers = Arc<[Box<dyn Analyzer>]>;
@@ -25,6 +26,7 @@ pub(crate) struct Worker {
     pub(crate) reader: Sender<ToReader>,
     pub(crate) coord: Sender<CoordMsg>,
     pub(crate) cancel: Arc<AtomicBool>,
+    pub(crate) source: ScanSource,
     pub(crate) source_len: u64,
     pub(crate) sector_size: u32,
 }
@@ -36,8 +38,9 @@ impl Worker {
                 // Drain without working so the reader is never blocked on a full queue.
                 continue;
             }
+            let start = matches!(job, Job::Start(_));
             self.handle(job);
-            let _ = self.reader.send(ToReader::JobDone);
+            let _ = self.reader.send(ToReader::JobDone { start });
         }
     }
 
@@ -45,6 +48,18 @@ impl Worker {
         let mut found = Vec::new();
         let mut spawned = 0;
         match job {
+            Job::Start(i) => {
+                if let Some(a) = self.analyzers.get(i) {
+                    let requests = self.call(a.as_ref(), None, &mut found, |a, cx| a.start(cx));
+                    spawned += self.forward(i, None, requests);
+                }
+                let _ = self.coord.send(CoordMsg::JobFinished {
+                    origin: None,
+                    block_holes: None,
+                    spawned,
+                    found,
+                });
+            }
             Job::Block(block) => {
                 let origin = block.range();
                 for (i, a) in self.analyzers.iter().enumerate() {
@@ -56,7 +71,7 @@ impl Worker {
                 }
                 let _ = self.coord.send(CoordMsg::JobFinished {
                     origin: Some(origin),
-                    block_holes: Some(block.holes),
+                    block_holes: Some(block.holes.clone()),
                     spawned,
                     found,
                 });
@@ -94,6 +109,7 @@ impl Worker {
     ) -> Vec<ReadRequest> {
         let mut requests = Vec::new();
         let mut cx = Context {
+            source: &self.source,
             found,
             requests: &mut requests,
             source_len: self.source_len,

@@ -2854,7 +2854,10 @@ name = "scan"
 version = "0.0.0"
 dependencies = [
  "blocksource",
+ "carver",
  "crossbeam-channel",
+ "fs",
+ "image",
  "index",
  "tempfile",
 ]

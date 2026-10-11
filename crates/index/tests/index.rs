@@ -160,8 +160,8 @@ fn merges_carved_duplicates_into_named_files() {
     let lone = named("x.jpg", &[], FileKind::Jpeg, vec![7 << 20..(7 << 20) + 10]);
     ix.insert(&[carved, unrelated, named_mov, lone]).unwrap();
 
-    assert_eq!(ix.merge_duplicates().unwrap(), 1);
-    assert_eq!(ix.merge_duplicates().unwrap(), 0, "idempotent");
+    assert_eq!(ix.merge_duplicates().unwrap().len(), 1);
+    assert_eq!(ix.merge_duplicates().unwrap(), [], "idempotent");
 
     let visible = ix.files(&Query::default()).unwrap();
     assert_eq!(visible.len(), 3);
@@ -291,7 +291,7 @@ fn file_system_entries_without_a_location_are_kept() {
     // Nothing to merge with without a location.
     ix.insert(&[NewFile::carved(FileKind::Jpeg, 0, 10)])
         .unwrap();
-    assert_eq!(ix.merge_duplicates().unwrap(), 0);
+    assert_eq!(ix.merge_duplicates().unwrap(), []);
 
     // Carving results always have one.
     let mut carved = NewFile::carved(FileKind::Jpeg, 0, 10);
@@ -366,4 +366,28 @@ fn repaired_files_are_counted() {
     ix.insert(&[NewFile::carved(FileKind::Mp4, 0, 10)]).unwrap();
     ix.set_status(1, Status::Repaired).unwrap();
     assert_eq!(ix.counts().unwrap().repaired, 1);
+}
+
+#[test]
+fn carved_files_inside_a_complete_one_are_folded_into_it() {
+    let mut ix = Index::open_in_memory().unwrap();
+    let mut video = NewFile::carved(FileKind::Mp4, 1 << 20, 4 << 20);
+    video.status = Status::Recoverable;
+    let mut frame = NewFile::carved(FileKind::Jpeg, (1 << 20) + 8192, 50_000);
+    frame.status = Status::Recoverable;
+    frame.preview.width = Some(640);
+    // Starts inside but runs past the end: not part of it.
+    let straddling = NewFile::carved(FileKind::Jpeg, (5 << 20) - 512, 4096);
+    // Inside a broken file: the container is not trusted.
+    let broken = NewFile::carved(FileKind::Mp4, 9 << 20, 1 << 20);
+    let inside_broken = NewFile::carved(FileKind::Jpeg, (9 << 20) + 512, 100);
+    ix.insert(&[video, frame, straddling, broken, inside_broken])
+        .unwrap();
+
+    let merges = ix.merge_duplicates().unwrap();
+    assert_eq!(merges, [(2, 1)]);
+    let video = ix.file(1).unwrap().unwrap();
+    assert_eq!(video.preview.width, None, "nothing copied from a part");
+    assert_eq!(ix.files(&Query::default()).unwrap().len(), 4);
+    assert_eq!(ix.merge_duplicates().unwrap(), []);
 }

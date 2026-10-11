@@ -5,10 +5,13 @@
 //!
 //! 1. Foreground reads (restore / preview, see [`crate::Foreground`]). While one is open
 //!    the scan does not read at all, then continues where it stopped.
-//! 2. [`Priority::Immediate`] analyzer requests.
-//! 3. The main pass: the planned ranges front to back, one block at a time.
-//! 4. [`Priority::Deferred`] analyzer requests, sorted by offset (one sweep).
-//! 5. Retrying bad ranges (ddrescue style: skip them in the main pass, retry at the end).
+//! 2. Blocking analyzer reads ([`crate::Context::source`]): served from recently read
+//!    blocks, by moving the main pass forward when the data is just ahead, or directly.
+//! 3. [`Priority::Immediate`] analyzer requests.
+//! 4. Analyzer `start` (metadata): the main pass waits for it.
+//! 5. The main pass: the planned ranges front to back, one block at a time.
+//! 6. [`Priority::Deferred`] analyzer requests, sorted by offset (one sweep).
+//! 7. Retrying bad ranges (ddrescue style: skip them in the main pass, retry at the end).
 //!
 //! Reference: GNU ddrescue manual, "Algorithm" (copying, trimming, scraping and retrying
 //! phases); the approach is reimplemented here from the description, not from its code.
@@ -23,12 +26,12 @@ use std::{
     },
 };
 
-use blocksource::BlockSource;
+use blocksource::{BlockSource, ReadError, ReadErrorKind};
 use crossbeam_channel::{Receiver, Select, Sender};
 
 use crate::{
     analyzer::{Block, Priority, ReadReply},
-    msg::{Command, CoordMsg, FgMsg, Job, ToReader},
+    msg::{Command, CoordMsg, FgMsg, Job, SyncRead, ToReader},
     progress::{Outcome, Phase, RunState},
     ranges::{RangeMap, RangeSet},
 };
@@ -45,6 +48,10 @@ pub(crate) struct ReaderConfig {
     /// After this many errors inside one block, the rest of the block is skipped (marked
     /// bad and left to the retry passes) instead of probing it further.
     pub(crate) max_errors_per_block: u32,
+    /// Main-pass data kept in memory after it is read, for blocking analyzer reads.
+    pub(crate) cache_bytes: u64,
+    /// How far ahead of the main pass a blocking read may pull it.
+    pub(crate) read_ahead: u64,
 }
 
 #[derive(Debug)]
@@ -60,6 +67,7 @@ pub(crate) struct Channels {
     pub(crate) requests: Receiver<ToReader>,
     pub(crate) control: Receiver<Command>,
     pub(crate) foreground: Receiver<FgMsg>,
+    pub(crate) sync: Receiver<SyncRead>,
     pub(crate) coord: Sender<CoordMsg>,
 }
 
@@ -68,6 +76,7 @@ enum Got {
     Command(Command),
     Foreground(FgMsg),
     Worker(ToReader),
+    Sync(SyncRead),
     Nothing,
 }
 
@@ -90,6 +99,15 @@ pub(crate) struct Reader {
     bad: RangeMap<u32>,
     /// A block read but not yet sent, waiting for the next block to fill its lookahead.
     pending: Option<Block>,
+    /// Blocks ready to be sent to the workers, in disk order.
+    ready: VecDeque<Arc<Block>>,
+    ready_bytes: u64,
+    /// Recently read main-pass blocks, oldest first.
+    cache: VecDeque<Arc<Block>>,
+    cached_bytes: u64,
+    /// Analyzers whose `start` has not been sent yet / has not finished yet.
+    start_queue: VecDeque<usize>,
+    starting: usize,
 
     immediate: VecDeque<PendingRequest>,
     /// Keyed by (offset, arrival) so they are served in disk order.
@@ -124,10 +142,10 @@ impl Reader {
         planned: RangeSet,
         bad: RangeMap<u32>,
         retry_passes_done: u32,
-        initial_requests: Vec<(PendingRequest, Priority)>,
+        analyzers: usize,
     ) -> Self {
         let sector = u64::from(source.sector_size()).max(1);
-        let mut r = Self {
+        Self {
             source,
             cfg,
             sector,
@@ -137,6 +155,12 @@ impl Reader {
             planned,
             bad,
             pending: None,
+            ready: VecDeque::new(),
+            ready_bytes: 0,
+            cache: VecDeque::new(),
+            cached_bytes: 0,
+            start_queue: (0..analyzers).collect(),
+            starting: 0,
             immediate: VecDeque::new(),
             deferred: BTreeMap::new(),
             arrivals: 0,
@@ -150,11 +174,7 @@ impl Reader {
             phase: None,
             main_pass_started: false,
             precise_errors: Cell::new(false),
-        };
-        for (req, priority) in initial_requests {
-            r.enqueue(req, priority);
         }
-        r
     }
 
     pub(crate) fn run(mut self) -> Outcome {
@@ -177,18 +197,31 @@ impl Reader {
                 continue;
             }
             self.drain_requests();
+            while let Ok(req) = self.ch.sync.try_recv() {
+                self.serve_sync(req);
+            }
 
-            if let Some(req) = self.immediate.pop_front() {
+            if let Some(i) = self.start_queue.pop_front() {
+                self.set_phase(Phase::Metadata);
+                self.send_job(Job::Start(i))?;
+                self.starting += 1;
+            } else if let Some(block) = self.ready.pop_front() {
+                self.ready_bytes = self.ready_bytes.saturating_sub(block.len as u64);
+                self.send_job(Job::Block(block))?;
+            } else if let Some(req) = self.immediate.pop_front() {
                 if !self.main_pass_started {
                     self.set_phase(Phase::Metadata);
                 }
                 self.serve_request(req)?;
+            } else if self.starting > 0 {
+                // Metadata first: the main pass waits for the analyzers' `start`.
+                self.set_phase(Phase::Metadata);
+                self.wait(true)?;
             } else if !self.plan.is_empty() {
                 self.set_phase(Phase::Scanning);
-                self.main_pass_started = true;
-                self.scan_step()?;
+                self.scan_step();
             } else if let Some(block) = self.pending.take() {
-                self.send_job(Job::Block(block))?;
+                self.finalize(block);
             } else if let Some(req) = self.deferred.pop_first().map(|(_, r)| r) {
                 self.set_phase(Phase::Finishing);
                 self.serve_request(req)?;
@@ -226,6 +259,7 @@ impl Reader {
             let control = sel.recv(&self.ch.control);
             let foreground = sel.recv(&self.ch.foreground);
             let from_workers = requests.then(|| sel.recv(&self.ch.requests));
+            let sync = requests.then(|| sel.recv(&self.ch.sync));
             let op = sel.select();
             let i = op.index();
             if i == control {
@@ -238,6 +272,8 @@ impl Reader {
                 // Disconnected: all workers are gone, so nothing outstanding will finish.
                 op.recv(&self.ch.requests)
                     .map_or(Got::Command(Command::Cancel), Got::Worker)
+            } else if Some(i) == sync {
+                op.recv(&self.ch.sync).map_or(Got::Nothing, Got::Sync)
             } else {
                 Got::Nothing
             }
@@ -254,6 +290,7 @@ impl Reader {
             Got::Command(cmd) => self.on_command(cmd)?,
             Got::Foreground(msg) => self.on_foreground(msg),
             Got::Worker(msg) => self.on_worker(msg),
+            Got::Sync(req) => self.serve_sync(req),
             Got::Nothing => {}
         }
         self.update_state();
@@ -332,7 +369,12 @@ impl Reader {
                 };
                 self.enqueue(pending, req.priority);
             }
-            ToReader::JobDone => self.outstanding = self.outstanding.saturating_sub(1),
+            ToReader::JobDone { start } => {
+                self.outstanding = self.outstanding.saturating_sub(1);
+                if start {
+                    self.starting = self.starting.saturating_sub(1);
+                }
+            }
         }
     }
 
@@ -355,7 +397,10 @@ impl Reader {
                 let mut sel = Select::new();
                 let send = sel.send(&self.ch.jobs);
                 let control = sel.recv(&self.ch.control);
-                sel.recv(&self.ch.foreground);
+                let foreground = sel.recv(&self.ch.foreground);
+                // Workers may be blocked on a read; serve them unless the scan is paused.
+                let running = !self.paused && self.leases == 0;
+                let sync = running.then(|| sel.recv(&self.ch.sync));
                 let op = sel.select();
                 let i = op.index();
                 if i == send {
@@ -368,11 +413,16 @@ impl Reader {
                         job,
                         Got::Command(op.recv(&self.ch.control).unwrap_or(Command::Cancel)),
                     ))
-                } else {
+                } else if i == foreground {
                     let got = op
                         .recv(&self.ch.foreground)
                         .map_or(Got::Nothing, Got::Foreground);
                     Some((job, got))
+                } else if Some(i) == sync {
+                    let got = op.recv(&self.ch.sync).map_or(Got::Nothing, Got::Sync);
+                    Some((job, got))
+                } else {
+                    Some((job, Got::Nothing))
                 }
             };
             match got {
@@ -390,11 +440,13 @@ impl Reader {
 
     // ---- Reads -------------------------------------------------------------------
 
-    /// One step of the main pass: read the next block.
-    fn scan_step(&mut self) -> Result<(), Stop> {
+    /// One step of the main pass: read the next block. It is queued in `ready` (not sent
+    /// here) so this can also run while serving a blocking read.
+    fn scan_step(&mut self) {
         let Some(front) = self.plan.front_mut() else {
-            return Ok(());
+            return;
         };
+        self.main_pass_started = true;
         // Blocks end on multiples of the block size, so they stay aligned after an
         // unaligned range start.
         let block_end = (front.start / self.cfg.block_size + 1)
@@ -431,16 +483,114 @@ impl Reader {
         };
 
         if self.cfg.lookahead == 0 {
-            return self.send_job(Job::Block(block));
+            self.finalize(block);
+            return;
         }
         if let Some(mut prev) = self.pending.take() {
             if prev.end() == block.offset {
                 fill_lookahead(&mut prev, &block);
             }
-            self.send_job(Job::Block(prev))?;
+            self.finalize(prev);
         }
         self.pending = Some(block);
-        Ok(())
+    }
+
+    /// A main-pass block is complete: keep it in the cache and queue it for the workers.
+    fn finalize(&mut self, block: Block) {
+        let block = Arc::new(block);
+        let len = block.len as u64;
+        self.cache.push_back(block.clone());
+        self.cached_bytes += len;
+        while self.cached_bytes > self.cfg.cache_bytes
+            && let Some(old) = self.cache.pop_front()
+        {
+            self.cached_bytes = self.cached_bytes.saturating_sub(old.len as u64);
+        }
+        self.ready.push_back(block);
+        self.ready_bytes += len;
+    }
+
+    // ---- Blocking analyzer reads -------------------------------------------------
+
+    fn serve_sync(&mut self, req: SyncRead) {
+        let SyncRead { offset, len, reply } = req;
+        let end = offset
+            .saturating_add(len as u64)
+            .min(self.source.len())
+            .max(offset);
+        let result = self.sync_read(offset..end);
+        // The worker may have given up (cancelled); nothing to do then.
+        let _ = reply.send(result);
+    }
+
+    fn sync_read(&mut self, range: Range<u64>) -> Result<Vec<u8>, ReadError> {
+        let mut out = vec![0u8; usize::try_from(range.end - range.start).unwrap_or(0)];
+        if out.is_empty() {
+            return Ok(out);
+        }
+        loop {
+            if let Some((bad, _)) = self.bad.overlapping(range.clone()).next() {
+                // Known to be unreadable: do not spend another error timeout on it now.
+                return Err(ReadError::new(
+                    bad,
+                    ReadErrorKind::Io(std::io::Error::other("recorded as unreadable")),
+                ));
+            }
+            if self.in_memory(range.clone(), Some(&mut out)) {
+                return Ok(out);
+            }
+            if !self.can_pull_forward(&range) {
+                break;
+            }
+            // The data is just ahead: read the main pass up to it instead of seeking.
+            self.scan_step();
+        }
+        let n = self.source.read_at(range.start, &mut out)?;
+        out.truncate(n);
+        Ok(out)
+    }
+
+    /// Whether `range` is entirely in recently read blocks (copying it into `out` if
+    /// given). A block's unreadable parts do not count.
+    fn in_memory(&self, range: Range<u64>, mut out: Option<&mut [u8]>) -> bool {
+        let mut covered = 0;
+        for b in self
+            .cache
+            .iter()
+            .map(Arc::as_ref)
+            .chain(self.pending.as_ref())
+        {
+            let (s, e) = (range.start.max(b.offset), range.end.min(b.end()));
+            if s >= e {
+                continue;
+            }
+            if b.holes.iter().any(|h| h.start < e && s < h.end) {
+                return false;
+            }
+            if let Some(out) = out.as_deref_mut() {
+                let rel = |x: u64, base: u64| usize::try_from(x - base).unwrap_or(usize::MAX);
+                let src = b.data().get(rel(s, b.offset)..rel(e, b.offset));
+                let dst = out.get_mut(rel(s, range.start)..rel(e, range.start));
+                match (src, dst) {
+                    (Some(src), Some(dst)) => dst.copy_from_slice(src),
+                    _ => return false,
+                }
+            }
+            covered += e - s;
+        }
+        covered == range.end - range.start
+    }
+
+    /// Whether reading the main pass forward will bring `range` into memory.
+    fn can_pull_forward(&self, range: &Range<u64>) -> bool {
+        let Some(front) = self.plan.front() else {
+            return false;
+        };
+        range.end > front.start
+            && range.end <= front.end
+            && range.end <= front.start.saturating_add(self.cfg.read_ahead)
+            && self.ready_bytes < self.cfg.read_ahead
+            && (range.start >= front.start || self.in_memory(range.start..front.start, None))
     }
 
     fn serve_request(&mut self, req: PendingRequest) -> Result<(), Stop> {
@@ -608,7 +758,7 @@ impl Reader {
                     holes: Vec::new(),
                     retry: true,
                 };
-                self.send_job(Job::Block(block))?;
+                self.send_job(Job::Block(Arc::new(block)))?;
             }
             Err(e) => {
                 let h = self.error_range(e.range(), chunk.clone());

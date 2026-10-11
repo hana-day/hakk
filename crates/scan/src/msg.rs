@@ -16,7 +16,7 @@
 //!                               └─────────────────────────────────────────────────┘
 //! ```
 
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use blocksource::ReadError;
 use crossbeam_channel::Sender;
@@ -30,7 +30,9 @@ use crate::{
 /// Work for the analyzer workers.
 #[derive(Debug)]
 pub(crate) enum Job {
-    Block(Block),
+    /// Run analyzer `n`'s [`crate::Analyzer::start`].
+    Start(usize),
+    Block(Arc<Block>),
     Reply {
         analyzer: usize,
         origin: Option<Range<u64>>,
@@ -48,7 +50,15 @@ pub(crate) enum ToReader {
         req: ReadRequest,
     },
     /// A job finished; sent after the requests it made.
-    JobDone,
+    JobDone { start: bool },
+}
+
+/// A blocking read from an analyzer (see [`crate::Context::source`]).
+#[derive(Debug)]
+pub(crate) struct SyncRead {
+    pub(crate) offset: u64,
+    pub(crate) len: usize,
+    pub(crate) reply: Sender<Result<Vec<u8>, ReadError>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

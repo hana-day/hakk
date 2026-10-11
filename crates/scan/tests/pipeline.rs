@@ -470,7 +470,7 @@ fn files_carved_and_named_are_merged_in_the_index() {
     handle.wait().unwrap();
     let mut ix = Index::open(&path).unwrap();
     // Both are photo/video? The carver reports JPEG, the metadata MOV: different media.
-    assert_eq!(ix.merge_duplicates().unwrap(), 0);
+    assert_eq!(ix.merge_duplicates().unwrap(), []);
     let files = ix.files(&Query::default()).unwrap();
     assert_eq!(files.len(), 2);
     assert!(files.iter().any(|f| f.origin == Origin::FileSystem));

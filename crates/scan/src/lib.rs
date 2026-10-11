@@ -14,12 +14,14 @@
 //! - Free-space-only scans read just the given ranges ([`Scan::ranges`]).
 
 mod analyzer;
+pub mod analyzers;
 mod clock;
 mod coord;
 mod msg;
 mod progress;
 mod ranges;
 mod reader;
+mod source;
 mod store;
 mod worker;
 
@@ -53,7 +55,8 @@ pub use store::{MemStore, MemStoreData, Store, StoreError};
 use crate::{
     coord::{CoordConfig, CoordInit, Coordinator},
     msg::{Command, FgMsg},
-    reader::{Channels, PendingRequest, Reader, ReaderConfig},
+    reader::{Channels, Reader, ReaderConfig},
+    source::ScanSource,
     worker::{Analyzers, Worker},
 };
 
@@ -80,6 +83,7 @@ pub struct Scan {
     progress_interval: Duration,
     checkpoint_interval: Duration,
     map_cells: usize,
+    read_cache: u64,
 }
 
 impl fmt::Debug for Scan {
@@ -114,11 +118,18 @@ impl Scan {
             progress_interval: Duration::from_millis(200),
             checkpoint_interval: Duration::from_secs(2),
             map_cells: 576,
+            read_cache: 64 << 20,
         }
     }
 
     pub fn analyzer(mut self, analyzer: impl Analyzer + 'static) -> Self {
         self.analyzers.push(Box::new(analyzer));
+        self
+    }
+
+    /// Adds several analyzers, e.g. [`analyzers::default_set`].
+    pub fn analyzers(mut self, analyzers: impl IntoIterator<Item = Box<dyn Analyzer>>) -> Self {
+        self.analyzers.extend(analyzers);
         self
     }
 
@@ -196,6 +207,14 @@ impl Scan {
 
     pub fn checkpoint_interval(mut self, d: Duration) -> Self {
         self.checkpoint_interval = d;
+        self
+    }
+
+    /// Memory for serving analyzers' blocking reads ([`Context::source`]) without extra
+    /// disk access (default 64 MiB): this much recently read data is kept, and the main
+    /// pass may be read this far ahead to answer a read just beyond it.
+    pub fn read_cache(mut self, bytes: u64) -> Self {
+        self.read_cache = bytes;
         self
     }
 
@@ -288,29 +307,6 @@ impl Scan {
             .unwrap_or(0)
             .min(self.block_size);
 
-        // Let analyzers queue their first reads (e.g. file system metadata).
-        let mut initial_findings = Vec::new();
-        let mut initial_requests = Vec::new();
-        for (i, a) in analyzers.iter().enumerate() {
-            let mut requests = Vec::new();
-            let mut cx = Context {
-                found: &mut initial_findings,
-                requests: &mut requests,
-                source_len: len,
-                sector_size,
-            };
-            a.start(&mut cx);
-            initial_requests.extend(requests.into_iter().map(|r| {
-                let pending = PendingRequest {
-                    analyzer: i,
-                    origin: None,
-                    range: r.range,
-                    tag: r.tag,
-                };
-                (pending, r.priority)
-            }));
-        }
-
         let cancel = Arc::new(AtomicBool::new(false));
         let (job_tx, job_rx) = bounded(self.workers * 2);
         let (req_tx, req_rx) = unbounded();
@@ -318,6 +314,12 @@ impl Scan {
         let (fg_tx, fg_rx) = unbounded();
         let (coord_tx, coord_rx) = unbounded();
         let (event_tx, event_rx) = bounded(256);
+        let (sync_tx, sync_rx) = unbounded();
+        let scan_source = ScanSource {
+            tx: sync_tx,
+            source: source.clone(),
+            cancel: cancel.clone(),
+        };
 
         let mut threads = Vec::new();
         let spawned =
@@ -329,6 +331,7 @@ impl Scan {
                         reader: req_tx.clone(),
                         coord: coord_tx.clone(),
                         cancel: cancel.clone(),
+                        source: scan_source.clone(),
                         source_len: len,
                         sector_size,
                     };
@@ -346,12 +349,15 @@ impl Scan {
                         retry_passes: self.retry_passes,
                         retry_chunk: self.retry_chunk,
                         max_errors_per_block: self.max_errors_per_block.max(1),
+                        cache_bytes: self.read_cache,
+                        read_ahead: self.read_cache,
                     },
                     Channels {
                         jobs: job_tx,
                         requests: req_rx,
                         control: ctrl_rx,
                         foreground: fg_rx,
+                        sync: sync_rx,
                         coord: coord_tx.clone(),
                     },
                     cancel.clone(),
@@ -359,7 +365,7 @@ impl Scan {
                     planned.clone(),
                     bad.clone(),
                     retry_passes_done,
-                    initial_requests,
+                    analyzers.len(),
                 );
                 threads.push(thread::Builder::new().name("scan-reader".into()).spawn(
                     move || {
@@ -373,6 +379,7 @@ impl Scan {
                         source_len: len,
                         sector_size,
                         retry_passes: self.retry_passes,
+                        source: scan_source,
                     },
                     coord_rx,
                     event_tx,
@@ -387,7 +394,6 @@ impl Scan {
                         bad,
                         retry_passes: retry_passes_done,
                         known_files: self.known_files,
-                        initial_findings,
                         map_cells: self.map_cells,
                     },
                 );

@@ -11,9 +11,12 @@ workspace = true
 
 [dependencies]
 blocksource = { path = "../blocksource" }
+carver = { path = "../carver" }
 crossbeam-channel = "0.5.17"
+fs = { path = "../fs" }
 index = { path = "../index" }
 
 [dev-dependencies]
 crossbeam-channel = "0.5.17"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 tempfile = "3.27.0"

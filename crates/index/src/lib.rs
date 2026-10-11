@@ -381,15 +381,22 @@ impl Index {
     /// are moved to `into`.
     pub fn merge(&mut self, from: i64, into: i64) -> Result<()> {
         let tx = self.conn.transaction()?;
-        merge_in(&tx, from, into)?;
+        merge_in(&tx, from, into, true)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Merges carving results into file system records describing the same file: same
-    /// start offset and same media category (a `.MOV` named file may be carved as MP4).
-    /// Returns how many records were merged.
-    pub fn merge_duplicates(&mut self) -> Result<usize> {
+    /// Folds carving results into the records they duplicate. Returns the merges made as
+    /// `(from, into)` pairs (for telling the GUI which entries to drop). Idempotent; safe to
+    /// call during a scan.
+    ///
+    /// 1. A carving result at the same start offset as a file system record of the same
+    ///    media category (a `.MOV` named file may be carved as MP4) is that file: it is
+    ///    merged into the named record, which takes over the preview information it lacks.
+    /// 2. A carving result lying entirely inside another complete, contiguous carving
+    ///    result is part of it (e.g. a JPEG frame inside a video, which parallel carving
+    ///    cannot always skip): it is merged into the container, without copying anything.
+    pub fn merge_duplicates(&mut self) -> Result<Vec<(i64, i64)>> {
         let tx = self.conn.transaction()?;
         let pairs: Vec<(i64, String, i64, String)> = {
             let mut stmt = tx.prepare(
@@ -402,7 +409,7 @@ impl Index {
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        let mut merged = 0;
+        let mut merged = Vec::new();
         let mut last_carved = None;
         for (carved, carved_kind, named, named_kind) in pairs {
             if last_carved == Some(carved) {
@@ -413,16 +420,51 @@ impl Index {
             if carved_kind.media() != named_kind.media() {
                 continue;
             }
-            merge_in(&tx, carved, named)?;
+            merge_in(&tx, carved, named, true)?;
             last_carved = Some(carved);
-            merged += 1;
+            merged.push((carved, named));
+        }
+
+        // Carving results inside a complete one, by a sweep in offset order.
+        let carved: Vec<(i64, i64, i64, i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT f.id, f.disk_offset, f.size, f.status, \
+                   (SELECT count(*) FROM extents AS e WHERE e.file_id = f.id) \
+                 FROM files AS f \
+                 WHERE f.origin = 2 AND f.merged_into IS NULL AND f.disk_offset IS NOT NULL \
+                 ORDER BY f.disk_offset, f.size DESC, f.id",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        // (id, start, end) of the complete file reaching furthest so far.
+        let mut container: Option<(i64, u64, u64)> = None;
+        for (id, offset, size, status, extents) in carved {
+            let start = from_i64(offset)?;
+            let end = start.saturating_add(from_i64(size)?);
+            if let Some((cid, cstart, cend)) = container
+                && start > cstart
+                && end <= cend
+            {
+                merge_in(&tx, id, cid, false)?;
+                merged.push((id, cid));
+                continue;
+            }
+            let complete = status == Status::Recoverable.code() && extents == 1;
+            if complete && container.is_none_or(|(_, _, cend)| end > cend) {
+                container = Some((id, start, end));
+            }
         }
         tx.commit()?;
         Ok(merged)
     }
 }
 
-fn merge_in(tx: &Transaction<'_>, from: i64, into: i64) -> Result<()> {
+/// Merges `from` into `into`; with `copy_preview`, `into` also takes the preview
+/// information (and a known status) it lacks from `from`.
+fn merge_in(tx: &Transaction<'_>, from: i64, into: i64, copy_preview: bool) -> Result<()> {
     if from == into {
         return Err(Error::InvalidMerge("cannot merge a file into itself"));
     }
@@ -447,6 +489,9 @@ fn merge_in(tx: &Transaction<'_>, from: i64, into: i64) -> Result<()> {
         "UPDATE files SET merged_into = ?2 WHERE merged_into = ?1",
         params![from, into],
     )?;
+    if !copy_preview {
+        return Ok(());
+    }
     tx.execute(
         "UPDATE files SET \
            status = CASE WHEN files.status = 0 THEN src.status ELSE files.status END, \
