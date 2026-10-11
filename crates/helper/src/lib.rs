@@ -441,8 +441,9 @@ impl Poller {
             return Ok(Changes::default());
         };
         // Fold carving results into the named records they duplicate, so the merge shows
-        // up while scanning. Cheap and idempotent.
-        index.merge_duplicates()?;
+        // up while scanning. Cheap and idempotent. It writes while the scan also writes, so
+        // it can lose a race for the lock; it is simply retried on the next poll.
+        let _ = index.merge_duplicates();
         let records = index.files(&Query {
             include_merged: true,
             ..Query::default()
