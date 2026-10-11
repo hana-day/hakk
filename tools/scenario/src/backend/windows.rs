@@ -67,20 +67,29 @@ impl Backend for Vhd {
         let _ = fs::remove_file(&script);
         result?;
 
-        // New-Partition places the partition itself unless an offset is given.
-        let place = match self.0.partition_start {
-            Some(start) => format!("-Offset {}", start * 512),
-            None => String::new(),
-        };
-        powershell(&format!(
-            "$d = Mount-DiskImage -ImagePath {img} -PassThru | Get-Disk
-             Initialize-Disk -Number $d.Number -PartitionStyle MBR
-             $p = New-Partition -DiskNumber $d.Number {place} -UseMaximumSize -AssignDriveLetter
-             Format-Volume -Partition $p {args} | Out-Null
-             Dismount-DiskImage -ImagePath {img} | Out-Null",
-            img = quote(&image),
-            args = self.format_args()?,
-        ))?;
+        if self.0.partition_start.is_some() {
+            // New-Partition only accepts aligned offsets, so write the MBR ourselves (a
+            // fixed VHD starts with the raw disk) and format the existing partition.
+            super::write_mbr(&image, &self.0)?;
+            let m = self.mount(&image)?;
+            let result = powershell(&format!(
+                "Format-Volume -DriveLetter {letter} {args} | Out-Null",
+                letter = m.root().to_string_lossy().chars().next().unwrap_or('Z'),
+                args = self.format_args()?,
+            ));
+            m.unmount()?;
+            result?;
+        } else {
+            powershell(&format!(
+                "$d = Mount-DiskImage -ImagePath {img} -PassThru | Get-Disk
+                 Initialize-Disk -Number $d.Number -PartitionStyle MBR
+                 $p = New-Partition -DiskNumber $d.Number -UseMaximumSize -AssignDriveLetter
+                 Format-Volume -Partition $p {args} | Out-Null
+                 Dismount-DiskImage -ImagePath {img} | Out-Null",
+                img = quote(&image),
+                args = self.format_args()?,
+            ))?;
+        }
         Ok(image)
     }
 
