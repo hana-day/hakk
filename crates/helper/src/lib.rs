@@ -43,11 +43,8 @@ pub type AnalyzerFactory = Arc<dyn Fn() -> Vec<Box<dyn Analyzer>> + Send + Sync>
 /// Lists destinations; the argument is the scanned device when it is a physical disk.
 type PlaceLister = Box<dyn Fn(Option<&Path>) -> Vec<Destination> + Send + Sync>;
 
-/// How often the index is read for new and merged files.
+/// How often the index is read for new and changed files.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// How often every shown record is re-read for status changes; this grows with the number
-/// of files, so it runs less often than the poll for new ones.
-const STATUS_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct RealHelper {
     shared: Arc<Shared>,
@@ -358,7 +355,7 @@ impl Pump {
                     eprintln!("analyzer {analyzer} panicked at {offset:?}; scanning continues");
                 }
                 Ok(Event::Finished(summary)) => {
-                    self.poll(true);
+                    self.poll();
                     self.ended.store(true, Ordering::Release);
                     let report = self.poller.summary(
                         self.scan_id,
@@ -377,15 +374,15 @@ impl Pump {
                 }
             }
             if Instant::now() >= next_poll {
-                self.poll(false);
+                self.poll();
                 next_poll = Instant::now() + POLL_INTERVAL;
             }
         }
     }
 
-    fn poll(&mut self, full: bool) {
+    fn poll(&mut self) {
         let scan_id = self.scan_id;
-        match self.poller.poll(full) {
+        match self.poller.poll() {
             Ok(changes) => {
                 if !changes.found.is_empty() {
                     self.shared.emit(HelperEvent::FilesFound(FilesFound {
@@ -420,12 +417,14 @@ struct Changes {
 }
 
 /// Reads the index for files that are new, changed or merged since the last poll.
+///
+/// Every record carries a revision the index bumps on insert and on any change the GUI
+/// shows (status, merge, name, ...), so each poll reads only what changed.
 struct Poller {
     path: PathBuf,
     index: Option<Index>,
-    /// Highest record id seen so far; newer records are new files.
-    last_id: i64,
-    next_status_check: Instant,
+    /// Highest revision seen so far.
+    last_rev: i64,
     /// Every record seen so far, as last reported.
     known: HashMap<i64, Known>,
     folders: HashMap<i64, Vec<String>>,
@@ -441,82 +440,72 @@ impl Poller {
         Self {
             path,
             index: None,
-            last_id: 0,
-            next_status_check: Instant::now(),
+            last_rev: 0,
             known: HashMap::new(),
             folders: HashMap::new(),
         }
     }
 
-    /// `full` re-reads every record for status changes regardless of the interval.
-    fn poll(&mut self, full: bool) -> Result<Changes, index::Error> {
+    fn poll(&mut self) -> Result<Changes, index::Error> {
         if self.index.is_none() {
             self.index = Some(Index::open(&self.path)?);
         }
         let Some(index) = self.index.as_mut() else {
             return Ok(Changes::default());
         };
-        let mut changes = Changes::default();
+        // Fold carving results into the named records they duplicate, so the merge shows
+        // up while scanning. It writes while the scan also writes; if it loses the race
+        // for the lock it is simply retried on the next poll. Merges bump the revision, so
+        // they are picked up below.
+        let _ = index.merge_duplicates();
 
-        // New records, including ones already merged (remembered, not shown).
-        let new = index.files(&Query {
-            after_id: Some(self.last_id),
+        let records = index.files(&Query {
+            changed_after: Some(self.last_rev),
             include_merged: true,
             ..Query::default()
         })?;
-        for record in new {
-            self.last_id = self.last_id.max(record.id);
-            let folders = match record.folder_id {
-                Some(id) => match self.folders.get(&id) {
-                    Some(path) => path.clone(),
-                    None => {
-                        let path = index.folder_path(id)?;
-                        self.folders.insert(id, path.clone());
-                        path
+        let mut changes = Changes::default();
+        for record in records {
+            self.last_rev = self.last_rev.max(record.rev);
+            match self.known.get_mut(&record.id) {
+                None => {
+                    let folders = match record.folder_id {
+                        Some(id) => match self.folders.get(&id) {
+                            Some(path) => path.clone(),
+                            None => {
+                                let path = index.folder_path(id)?;
+                                self.folders.insert(id, path.clone());
+                                path
+                            }
+                        },
+                        None => Vec::new(),
+                    };
+                    let file = convert::found_file(&record, folders);
+                    let merged = record.merged_into.is_some();
+                    if !merged {
+                        changes.found.push(file.clone());
                     }
-                },
-                None => Vec::new(),
-            };
-            let file = convert::found_file(&record, folders);
-            let merged = record.merged_into.is_some();
-            if !merged {
-                changes.found.push(file.clone());
-            }
-            self.known.insert(record.id, Known { file, merged });
-        }
-
-        // Fold carving results into the named records they duplicate, so the merge shows
-        // up while scanning. It writes while the scan also writes; if it loses the race
-        // for the lock it is simply retried on the next poll.
-        if let Ok(pairs) = index.merge_duplicates() {
-            for (from, into) in pairs {
-                if let Some(known) = self.known.get_mut(&from)
-                    && !known.merged
-                {
-                    known.merged = true;
-                    changes.merges.push(FileMerge {
-                        from: known.file.id,
-                        into: hakk_protocol::FileId(u64::try_from(into).unwrap_or(0)),
-                    });
+                    self.known.insert(record.id, Known { file, merged });
                 }
-            }
-        }
-
-        // Verification results for records already shown.
-        if full || Instant::now() >= self.next_status_check {
-            self.next_status_check = Instant::now() + STATUS_INTERVAL;
-            for record in index.files(&Query::default())? {
-                let Some(known) = self.known.get_mut(&record.id) else {
-                    continue;
-                };
-                let status = convert::status(record.status);
-                if status != known.file.status && !known.merged {
-                    known.file.status = status;
-                    changes.updates.push(FileUpdate {
-                        id: known.file.id,
-                        status,
-                        repair: known.file.repair,
-                    });
+                Some(known) if known.merged => {}
+                Some(known) => {
+                    if let Some(into) = record.merged_into {
+                        known.merged = true;
+                        changes.merges.push(FileMerge {
+                            from: known.file.id,
+                            into: hakk_protocol::FileId(u64::try_from(into).unwrap_or(0)),
+                        });
+                        continue;
+                    }
+                    let status = convert::status(record.status);
+                    if status != known.file.status {
+                        known.file.status = status;
+                        changes.updates.push(FileUpdate {
+                            id: known.file.id,
+                            status,
+                            repair: known.file.repair,
+                        });
+                    }
                 }
             }
         }
