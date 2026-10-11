@@ -38,6 +38,9 @@ pub struct Query {
     pub media: Option<Media>,
     /// Only files with an id greater than this (files found after a given point).
     pub after_id: Option<i64>,
+    /// Only files added or changed (status, merge, preview, ...) after this revision
+    /// (see [`FileRecord::rev`]). Combine with `include_merged` to also see merges.
+    pub changed_after: Option<i64>,
     /// Only files in this folder.
     pub folder_id: Option<i64>,
     /// Include records merged into another one.
@@ -71,7 +74,7 @@ impl std::fmt::Debug for Index {
 const FILE_COLUMNS: &str = "f.id, f.origin, f.kind, f.status, f.disk_offset, f.size, f.name, \
      f.folder_id, f.fs_ref, f.deleted, f.merged_into, f.width, f.height, f.duration_ms, \
      f.taken_at, f.camera, f.thumb_offset, f.thumb_len, f.created_at, f.modified_at, \
-     f.name_exact, f.confidence, v.part_index, v.label";
+     f.name_exact, f.confidence, v.part_index, v.label, f.rev";
 const FILE_FROM: &str = "files AS f LEFT JOIN volumes AS v ON v.id = f.volume_id";
 
 impl Index {
@@ -233,6 +236,10 @@ impl Index {
             args.push(Value::Integer(after));
             sql.push_str(&format!(" AND f.id > ?{}", args.len()));
         }
+        if let Some(rev) = query.changed_after {
+            args.push(Value::Integer(rev));
+            sql.push_str(&format!(" AND f.rev > ?{}", args.len()));
+        }
         if let Some(folder) = query.folder_id {
             args.push(Value::Integer(folder));
             sql.push_str(&format!(" AND f.folder_id = ?{}", args.len()));
@@ -252,6 +259,14 @@ impl Index {
             out.push(file_from_row(row)?);
         }
         Ok(out)
+    }
+
+    /// The latest revision (0 if no file was ever stored). Every added or changed file
+    /// record gets a new, larger revision.
+    pub fn revision(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM revision WHERE id = 1", [], |r| r.get(0))?)
     }
 
     /// The largest file id so far (0 if none). Pair with [`Query::after_id`] to show
@@ -686,6 +701,7 @@ fn file_from_row(r: &Row<'_>) -> Result<FileRecord> {
             None => None,
         },
         merged_into: r.get(10)?,
+        rev: r.get(24)?,
         preview: Preview {
             width: r.get(11)?,
             height: r.get(12)?,

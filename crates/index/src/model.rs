@@ -355,6 +355,10 @@ pub struct FileRecord {
     /// Set when this record was found to be the same file as another one (e.g. a carving
     /// result matching a named file system record). Merged records are hidden from listings.
     pub merged_into: Option<i64>,
+    /// Revision of the last change to this record, from a counter shared by the whole
+    /// index. To follow changes, remember the largest `rev` seen and query
+    /// [`crate::Query::changed_after`] with it.
+    pub rev: i64,
     pub preview: Preview,
 }
 

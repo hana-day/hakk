@@ -26,10 +26,14 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
         description: "volumes, unknown offsets, confidence, guessed names, local dates",
         sql: V2,
     },
+    Migration {
+        description: "file revisions for change tracking",
+        sql: V3,
+    },
 ];
 
 /// The schema version this build reads and writes. Always equals `MIGRATIONS.len()`.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 const V1: &str = "
 CREATE TABLE meta (
@@ -170,6 +174,39 @@ CREATE UNIQUE INDEX files_carved_identity ON files (disk_offset, kind) WHERE ori
 CREATE UNIQUE INDEX files_fs_identity ON files (fs_ref) WHERE origin = 1 AND fs_ref IS NOT NULL;
 ";
 
+/// v3: `files.rev`, a database-wide counter bumped whenever a file record is added or
+/// changes in a way the GUI shows (status, merge, preview, name...), so "what changed
+/// since revision N" is one indexed query. Triggers maintain it, so it holds whichever
+/// connection writes (the scan's checkpoints, the GUI side merging duplicates).
+const V3: &str = "
+CREATE TABLE revision (
+    id    INTEGER PRIMARY KEY CHECK (id = 1),
+    value INTEGER NOT NULL
+) STRICT;
+
+ALTER TABLE files ADD COLUMN rev INTEGER NOT NULL DEFAULT 0;
+UPDATE files SET rev = id;
+INSERT INTO revision (id, value) VALUES (1, (SELECT ifnull(max(rev), 0) FROM files));
+CREATE INDEX files_rev ON files (rev);
+
+CREATE TRIGGER files_rev_on_insert AFTER INSERT ON files
+BEGIN
+    UPDATE revision SET value = value + 1 WHERE id = 1;
+    UPDATE files SET rev = (SELECT value FROM revision WHERE id = 1) WHERE id = NEW.id;
+END;
+
+-- Only columns the GUI shows; `rev` itself is not listed, so setting it does not fire
+-- this again.
+CREATE TRIGGER files_rev_on_update
+AFTER UPDATE OF status, merged_into, disk_offset, size, name, volume_id, folder_id,
+    name_exact, deleted, confidence, width, height, duration_ms, taken_at, camera,
+    thumb_offset, thumb_len, created_at, modified_at ON files
+BEGIN
+    UPDATE revision SET value = value + 1 WHERE id = 1;
+    UPDATE files SET rev = (SELECT value FROM revision WHERE id = 1) WHERE id = NEW.id;
+END;
+";
+
 /// Brings the schema up to the latest version.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), Error> {
     migrate_with(conn, MIGRATIONS)
@@ -282,7 +319,7 @@ mod tests {
         )
         .unwrap();
 
-        migrate(&mut conn).unwrap();
+        migrate_with(&mut conn, &MIGRATIONS[..2]).unwrap();
         assert_eq!(user_version(&conn).unwrap(), 2);
         // Rebuilding `files` must not cascade into `extents`.
         let extents: i64 = conn
@@ -310,6 +347,30 @@ mod tests {
             conn.execute("UPDATE files SET merged_into = 99 WHERE id = 2", [])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn v2_records_get_revisions_in_v3() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_with(&mut conn, &MIGRATIONS[..2]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (origin, kind, status, disk_offset, size, name_exact, deleted)
+             VALUES (2, 'jpg', 0, 0, 10, 1, 1), (2, 'jpg', 0, 512, 10, 1, 1);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let revs: Vec<i64> = conn
+            .prepare("SELECT rev FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(revs, [1, 2]);
+        let current: i64 = conn
+            .query_row("SELECT value FROM revision", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(current, 2);
     }
 
     #[test]

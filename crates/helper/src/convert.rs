@@ -218,6 +218,7 @@ mod tests {
             deleted: true,
             confidence: None,
             merged_into: None,
+            rev: 0,
             preview: Preview::default(),
         }
     }

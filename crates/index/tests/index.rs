@@ -420,3 +420,54 @@ fn two_writers_on_separate_connections_do_not_fail() {
     scanner.join().unwrap();
     assert_eq!(ix.files(&Query::default()).unwrap().len(), 300);
 }
+
+#[test]
+fn changes_are_tracked_by_revision() {
+    let mut ix = Index::open_in_memory().unwrap();
+    assert_eq!(ix.revision().unwrap(), 0);
+    ix.insert(&[
+        NewFile::carved(FileKind::Jpeg, 0, 10),
+        named("a.jpg", &[], FileKind::Jpeg, vec![0..10]),
+        NewFile::carved(FileKind::Jpeg, 512, 10),
+    ])
+    .unwrap();
+    let seen = ix.revision().unwrap();
+    assert_eq!(seen, 3);
+    let changed = |ix: &Index, after: i64| -> Vec<i64> {
+        ix.files(&Query {
+            changed_after: Some(after),
+            include_merged: true,
+            ..Query::default()
+        })
+        .unwrap()
+        .iter()
+        .map(|f| f.id)
+        .collect()
+    };
+    assert_eq!(changed(&ix, seen), [] as [i64; 0]);
+
+    // Re-reporting, or saving progress alone, changes nothing.
+    ix.insert(&[NewFile::carved(FileKind::Jpeg, 0, 10)])
+        .unwrap();
+    ix.commit(&[], &ScanProgress::default()).unwrap();
+    assert_eq!(ix.revision().unwrap(), seen);
+
+    // A status update, a merge (both records) and a new file are all visible at once.
+    ix.set_status(3, Status::Damaged).unwrap();
+    ix.merge_duplicates().unwrap();
+    ix.insert(&[NewFile::carved(FileKind::Png, 4096, 10)])
+        .unwrap();
+    assert_eq!(changed(&ix, seen), [1, 2, 3, 4]);
+    let after = ix
+        .files(&Query {
+            changed_after: Some(seen),
+            include_merged: true,
+            ..Query::default()
+        })
+        .unwrap();
+    let carved = after.iter().find(|f| f.id == 1).unwrap();
+    assert_eq!(carved.merged_into, Some(2));
+    let latest = after.iter().map(|f| f.rev).max().unwrap();
+    assert_eq!(latest, ix.revision().unwrap());
+    assert_eq!(changed(&ix, latest), [] as [i64; 0]);
+}
