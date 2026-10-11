@@ -65,7 +65,7 @@ pub(crate) fn carve_with_plan<S: BlockSource + ?Sized>(
         segments: 0,
         scans: 0,
         plan: None,
-        quant_dc: [1; 4],
+        quant: [[1; 64]; 4],
     };
     let (end, status) = p.run();
     if p.segments == 0 {
@@ -194,8 +194,8 @@ struct Parser<'r, 'a, S: BlockSource + ?Sized> {
     scans: u32,
     /// The plan of the last decoded scan.
     plan: Option<Plan>,
-    /// The DC entry of each quantization table (to scale DC coefficients).
-    quant_dc: [i32; 4],
+    /// Quantization tables in zigzag order (to scale coefficients back).
+    quant: [[i32; 64]; 4],
 }
 
 /// Why decoding stopped.
@@ -283,18 +283,22 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
         (at == end).then_some(())
     }
 
-    /// DQT (B.2.4.1): keeps each table's DC entry (the first value in zigzag order).
+    /// DQT (B.2.4.1): keeps each table (in zigzag order).
     fn dqt(&mut self, mut at: u64, len: u64) -> Option<()> {
         let end = at + len;
         while at < end {
             let pq_tq = self.r.byte(at)?;
             let wide = pq_tq >> 4 != 0;
-            let dc = if wide {
-                i32::from(self.r.u16_be(at + 1)?)
-            } else {
-                i32::from(self.r.byte(at + 1)?)
-            };
-            *self.quant_dc.get_mut(usize::from(pq_tq & 0x03))? = dc.max(1);
+            let mut table = [1i32; 64];
+            for (k, q) in table.iter_mut().enumerate() {
+                let k = k as u64;
+                *q = if wide {
+                    i32::from(self.r.u16_be(at + 1 + 2 * k)?)
+                } else {
+                    i32::from(self.r.byte(at + 1 + k)?)
+                };
+            }
+            *self.quant.get_mut(usize::from(pq_tq & 0x03))? = table;
             at += 1 + 64 * if wide { 2 } else { 1 };
         }
         (at == end).then_some(())
@@ -373,7 +377,11 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
             let (Some(dc), Some(ac)) = (dc, ac) else {
                 return Err(Stop::Corrupt(at));
             };
-            let quant = self.quant_dc.get(usize::from(c.tq)).copied().unwrap_or(1);
+            let quant = self
+                .quant
+                .get(usize::from(c.tq))
+                .copied()
+                .unwrap_or([1; 64]);
             let luma = frame.components.first().is_some_and(|f| f.id == c.id);
             layout.push((c.h, c.v, dc.clone(), ac.clone(), quant, luma));
         }
@@ -494,8 +502,8 @@ struct ScanComp {
     v: u64,
     dc: Huffman,
     ac: Huffman,
-    /// DC quantizer, to scale DC coefficients back.
-    quant: i32,
+    /// Quantization table in zigzag order, to scale coefficients back.
+    quant: [i32; 64],
     /// The first (luminance) component, whose DC values form a 1/8-scale image.
     luma: bool,
 }
@@ -528,6 +536,14 @@ pub(crate) struct Snapshot {
     pred: [i32; 4],
 }
 
+impl Plan {
+    /// Whether the scan has restart markers (checked by the decoder, a strong signal when
+    /// splicing fragments).
+    pub fn has_restart(&self) -> bool {
+        self.restart > 0
+    }
+}
+
 impl Snapshot {
     pub fn start(data: u64) -> Self {
         Self {
@@ -551,9 +567,8 @@ pub(crate) enum Outcome {
 }
 
 /// Decodes `plan`'s MCUs from `from` until the end, an error, or `cap` (an offset).
-/// With `snaps`, records the state at every MCU start; with `dcs`, records each luminance
-/// block's DC value (scaled back by its quantizer) as `(block index, value)`, where the
-/// index is `row * luma_cols + column` in the 1/8-scale image.
+/// With `snaps`, records the state at every MCU start; with `edges`, records the top and
+/// bottom pixel rows of each luminance block (see [`Edges`]).
 pub(crate) fn decode<T: Stream + ?Sized>(
     plan: &Plan,
     s: &mut T,
@@ -561,7 +576,7 @@ pub(crate) fn decode<T: Stream + ?Sized>(
     limit: u64,
     cap: Option<u64>,
     mut snaps: Option<&mut Vec<Snapshot>>,
-    mut dcs: Option<&mut Vec<(u64, i32)>>,
+    mut edges: Option<&mut Vec<Edges>>,
 ) -> Outcome {
     let mut bits = Bits {
         pos: from.pos,
@@ -572,6 +587,7 @@ pub(crate) fn decode<T: Stream + ?Sized>(
     };
     let mut rst = from.rst;
     let mut pred = from.pred;
+    let mut coefs = [0i32; 64];
     for mcu in from.mcu..plan.mcus {
         let snap = Snapshot {
             pos: bits.pos,
@@ -596,18 +612,31 @@ pub(crate) fn decode<T: Stream + ?Sized>(
             let (mx, my) = (mcu % plan.mcu_cols, mcu / plan.mcu_cols);
             for (ci, c) in plan.layout.iter().enumerate() {
                 for k in 0..u64::from(c.n) {
-                    let diff = block(s, &mut bits, &c.dc, &c.ac)?;
+                    let want = c.luma && edges.is_some();
+                    let diff = block(
+                        s,
+                        &mut bits,
+                        &c.dc,
+                        &c.ac,
+                        want.then_some((&mut coefs, &c.quant)),
+                    )?;
                     let p = pred.get_mut(ci).ok_or(Stop::Corrupt(bits.pos))?;
                     *p = p.wrapping_add(diff);
                     if c.luma
-                        && let Some(v) = dcs.as_deref_mut()
+                        && let Some(v) = edges.as_deref_mut()
                     {
                         let (bx, by) = if plan.interleaved {
                             (mx * c.h + k % c.h, my * c.v + k / c.h)
                         } else {
                             (mx, my)
                         };
-                        v.push((by * plan.luma_cols + bx, p.wrapping_mul(c.quant)));
+                        coefs[0] = p.wrapping_mul(c.quant[0]);
+                        let (top, bottom) = edge_rows(&coefs);
+                        v.push(Edges {
+                            idx: by * plan.luma_cols + bx,
+                            top,
+                            bottom,
+                        });
                     }
                 }
             }
@@ -783,14 +812,89 @@ impl Bits {
     }
 }
 
-/// Decodes one 8x8 block (F.2.2.1-F.2.2.2) and returns its DC difference. The AC
-/// coefficients are skipped without reconstructing them.
+/// The top and bottom pixel rows of a luminance block, to judge whether two blocks fit
+/// together vertically (the level shift of 128 is left out; only differences matter).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Edges {
+    /// `row * luma_cols + column` in the grid of 8x8 luminance blocks.
+    pub idx: u64,
+    pub top: [i16; 8],
+    pub bottom: [i16; 8],
+}
+
+/// Zigzag position -> natural (row-major) position (T.81 Figure A.6).
+const ZIGZAG: [usize; 64] = [
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
+    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
+    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+];
+
+/// `c(u) * cos((2x + 1) u pi / 16) / 2` for x, u in 0..8 (T.81 A.3.3, the 8x8 IDCT).
+fn idct_basis() -> &'static [[f32; 8]; 8] {
+    static BASIS: std::sync::OnceLock<[[f32; 8]; 8]> = std::sync::OnceLock::new();
+    BASIS.get_or_init(|| {
+        let mut t = [[0f32; 8]; 8];
+        for (x, row) in t.iter_mut().enumerate() {
+            for (u, v) in row.iter_mut().enumerate() {
+                let c = if u == 0 {
+                    std::f32::consts::FRAC_1_SQRT_2
+                } else {
+                    1.0
+                };
+                let angle = (2 * x + 1) as f32 * u as f32 * std::f32::consts::PI / 16.0;
+                *v = c * angle.cos() / 2.0;
+            }
+        }
+        t
+    })
+}
+
+/// Pixel rows 0 and 7 of a block from its dequantized coefficients (zigzag order).
+// Every index below is into an 8x8 array with a 0..8 loop variable, and pixel values are
+// clamped to the i16 range before narrowing.
+#[allow(clippy::indexing_slicing, clippy::cast_possible_truncation)]
+fn edge_rows(zz: &[i32; 64]) -> ([i16; 8], [i16; 8]) {
+    let basis = idct_basis();
+    let mut f = [[0f32; 8]; 8];
+    for (k, &v) in zz.iter().enumerate() {
+        if v != 0 {
+            let n = ZIGZAG.get(k).copied().unwrap_or(0);
+            if let Some(cell) = f.get_mut(n / 8).and_then(|r| r.get_mut(n % 8)) {
+                *cell = v as f32;
+            }
+        }
+    }
+    // g[v][x] = sum over u of basis[x][u] * f[v][u]
+    let mut g = [[0f32; 8]; 8];
+    for (gv, fv) in g.iter_mut().zip(&f) {
+        for (x, out) in gv.iter_mut().enumerate() {
+            *out = basis[x].iter().zip(fv).map(|(b, c)| b * c).sum();
+        }
+    }
+    let row = |y: usize| {
+        let mut px = [0i16; 8];
+        for (x, p) in px.iter_mut().enumerate() {
+            let v: f32 = (0..8).map(|v| basis[y][v] * g[v][x]).sum();
+            *p = v.round().clamp(-2048.0, 2047.0) as i16;
+        }
+        px
+    };
+    (row(0), row(7))
+}
+
+/// Decodes one 8x8 block (F.2.2.1-F.2.2.2) and returns its DC difference. With `coefs`,
+/// the AC coefficients are dequantized into the given buffer (zigzag order); otherwise
+/// they are only skipped.
 fn block<T: Stream + ?Sized>(
     s: &mut T,
     bits: &mut Bits,
     dc: &Huffman,
     ac: &Huffman,
+    mut coefs: Option<(&mut [i32; 64], &[i32; 64])>,
 ) -> Result<i32, Stop> {
+    if let Some((c, _)) = coefs.as_mut() {
+        c.fill(0);
+    }
     let size = bits.decode(s, dc)?;
     if size > 11 {
         return Err(Stop::Corrupt(bits.pos));
@@ -812,7 +916,16 @@ fn block<T: Stream + ?Sized>(
         if k > 63 || size > 10 {
             return Err(Stop::Corrupt(at));
         }
-        bits.skip(s, size)?;
+        match coefs.as_mut() {
+            Some((c, q)) => {
+                let v = bits.receive_extend(s, size)?;
+                let i = k as usize;
+                if let (Some(slot), Some(qk)) = (c.get_mut(i), q.get(i)) {
+                    *slot = v.wrapping_mul(*qk);
+                }
+            }
+            None => bits.skip(s, size)?,
+        }
         k += 1;
     }
     if k > 64 {

@@ -57,44 +57,8 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
                 continue;
             }
             let head = data.get(off..off + 8).unwrap_or_default();
-            let hit = if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
-                jpeg::carve(&mut parse, at, opts.max_jpeg).map(|j| {
-                    let status = match j.status {
-                        jpeg::Status::Complete => Status::Complete,
-                        jpeg::Status::Corrupt { at } => Status::Corrupt { at },
-                        jpeg::Status::Truncated => Status::Truncated,
-                    };
-                    let broken = matches!(status, Status::Corrupt { .. });
-                    let joined = opts
-                        .reassemble
-                        .filter(|_| broken)
-                        .and_then(|o| fragments::reassemble(&mut parse, at, opts.max_jpeg, &o))
-                        .filter(|r| r.complete);
-                    match joined {
-                        Some(r) => Found {
-                            offset: at,
-                            len: r.fragments.iter().map(|f| f.1).sum(),
-                            kind: Kind::Jpeg,
-                            status: Status::Complete,
-                            fragments: r.fragments,
-                        },
-                        None => Found::contiguous(at, j.len, Kind::Jpeg, status),
-                    }
-                })
-            } else if head.get(4..8) == Some(b"ftyp") {
-                mp4::carve(&mut parse, at, opts.max_video).map(|m| {
-                    let kind = if &m.brand == b"qt  " {
-                        Kind::Mov
-                    } else {
-                        Kind::Mp4
-                    };
-                    let status = match m.status {
-                        mp4::Status::Complete => Status::Complete,
-                        mp4::Status::Corrupt { at } => Status::Corrupt { at },
-                        mp4::Status::Truncated => Status::Truncated,
-                    };
-                    Found::contiguous(at, m.len, kind, status)
-                })
+            let hit = if looks_like_header(head) {
+                carve_at(&mut parse, at, opts)
             } else {
                 None
             };
@@ -108,4 +72,58 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
         pos += n as u64;
     }
     found
+}
+
+/// Whether `head` (the first bytes of a sector) starts a file this crate can carve.
+pub fn looks_like_header(head: &[u8]) -> bool {
+    head.starts_with(&[0xFF, 0xD8, 0xFF]) || head.get(4..8) == Some(b"ftyp")
+}
+
+/// Carves the file starting at `at`, if any: a JPEG (reassembled if fragmented and
+/// `opts.reassemble` is set) or an MP4/QuickTime file. This is what [`scan`] does at each
+/// header it finds, for callers that drive the reading themselves.
+pub fn carve_at<S: BlockSource + ?Sized>(
+    r: &mut Reader<S>,
+    at: u64,
+    opts: &Options,
+) -> Option<Found> {
+    let head = r.slice(at, 8)?.to_vec();
+    if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        let j = jpeg::carve(r, at, opts.max_jpeg)?;
+        let status = match j.status {
+            jpeg::Status::Complete => Status::Complete,
+            jpeg::Status::Corrupt { at } => Status::Corrupt { at },
+            jpeg::Status::Truncated => Status::Truncated,
+        };
+        let joined = opts
+            .reassemble
+            .filter(|_| matches!(status, Status::Corrupt { .. }))
+            .and_then(|o| fragments::reassemble(r, at, opts.max_jpeg, &o))
+            .filter(|f| f.complete);
+        return Some(match joined {
+            Some(f) => Found {
+                offset: at,
+                len: f.fragments.iter().map(|x| x.1).sum(),
+                kind: Kind::Jpeg,
+                status: Status::Complete,
+                fragments: f.fragments,
+            },
+            None => Found::contiguous(at, j.len, Kind::Jpeg, status),
+        });
+    }
+    if head.get(4..8) == Some(b"ftyp") {
+        let m = mp4::carve(r, at, opts.max_video)?;
+        let kind = if &m.brand == b"qt  " {
+            Kind::Mov
+        } else {
+            Kind::Mp4
+        };
+        let status = match m.status {
+            mp4::Status::Complete => Status::Complete,
+            mp4::Status::Corrupt { at } => Status::Corrupt { at },
+            mp4::Status::Truncated => Status::Truncated,
+        };
+        return Some(Found::contiguous(at, m.len, kind, status));
+    }
+    None
 }

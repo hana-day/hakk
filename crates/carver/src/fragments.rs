@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use blocksource::BlockSource;
 
 use crate::{
-    jpeg::{self, Outcome, Plan, Snapshot, Stop, Stream},
+    jpeg::{self, Edges, Outcome, Plan, Snapshot, Stop, Stream},
     reader::Reader,
 };
 
@@ -51,8 +51,15 @@ pub struct Options {
     pub min_progress: u64,
     /// A seam this many times rougher than the photo's own row-to-row change is rejected.
     pub max_seam: f64,
-    /// A seam this smooth (with a clean decoding window) is taken without looking further.
+    /// With restart markers (which the decoder checks too), a seam this smooth with a
+    /// clean decoding window is taken without looking further.
     pub good_seam: f64,
+    /// Without restart markers, the best seam must be at most this fraction of the best
+    /// seam found elsewhere (away from it); otherwise the choice is ambiguous and the file
+    /// is left broken rather than glued to data that merely looks alike.
+    pub distinct: f64,
+    /// Candidates closer than this to the best one count as the same place.
+    pub vicinity: u64,
     pub max_fragments: usize,
     /// Trial decodes allowed per file.
     pub budget: u32,
@@ -69,6 +76,8 @@ impl Default for Options {
             min_progress: 2048,
             max_seam: 3.0,
             good_seam: 1.5,
+            distinct: 0.9,
+            vicinity: 256 << 10,
             max_fragments: 8,
             budget: 8_000,
         }
@@ -115,22 +124,22 @@ impl<S: BlockSource + ?Sized> Stream for Spliced<'_, '_, S> {
     }
 }
 
-/// Decoding progress so far: decoder states and luminance DC values, in step.
+/// Decoding progress so far: decoder states and luminance block edges, in step.
 #[derive(Default)]
 struct Trace {
     snaps: Vec<Snapshot>,
-    /// `dcs.len()` when each snapshot was taken.
+    /// `edges.len()` when each snapshot was taken.
     marks: Vec<usize>,
-    dcs: Vec<(u64, i32)>,
+    edges: Vec<Edges>,
 }
 
 impl Trace {
     /// Drops everything decoded from snapshot `i` on.
     fn truncate(&mut self, i: usize) {
-        let mark = self.marks.get(i).copied().unwrap_or(self.dcs.len());
+        let mark = self.marks.get(i).copied().unwrap_or(self.edges.len());
         self.snaps.truncate(i);
         self.marks.truncate(i);
-        self.dcs.truncate(mark);
+        self.edges.truncate(mark);
     }
 }
 
@@ -215,7 +224,7 @@ fn run<S: BlockSource + ?Sized>(
         segs: segs.to_vec(),
     };
     let mut snaps = Vec::new();
-    let mut dcs = Vec::new();
+    let mut edges = Vec::new();
     let outcome = jpeg::decode(
         plan,
         &mut sp,
@@ -223,20 +232,20 @@ fn run<S: BlockSource + ?Sized>(
         limit,
         None,
         Some(&mut snaps),
-        Some(&mut dcs),
+        Some(&mut edges),
     );
     // Each MCU contributes the same number of luminance blocks.
     let per = if snaps.is_empty() {
         0
     } else {
-        dcs.len().div_ceil(snaps.len())
+        edges.len().div_ceil(snaps.len())
     };
-    let base = trace.dcs.len();
+    let base = trace.edges.len();
     for (k, snap) in snaps.into_iter().enumerate() {
-        trace.marks.push((base + k * per).min(base + dcs.len()));
+        trace.marks.push((base + k * per).min(base + edges.len()));
         trace.snaps.push(snap);
     }
-    trace.dcs.extend(dcs);
+    trace.edges.extend(edges);
     outcome
 }
 
@@ -280,6 +289,9 @@ impl Search<'_> {
         let cols = self.plan.luma_cols.max(1);
         // (seam roughness, progress, b, s)
         let mut best: Option<(f64, u64, u64, u64)> = None;
+        // Every acceptable candidate: (seam roughness, source offset).
+        let mut seen: Vec<(f64, u64)> = Vec::new();
+        let strong = self.plan.has_restart();
         for &b in &boundaries {
             let i = trace.snaps.partition_point(|x| x.pos <= b);
             let Some(k) = i.checked_sub(1) else { continue };
@@ -287,8 +299,8 @@ impl Search<'_> {
                 continue;
             };
             let mark = trace.marks.get(k).copied().unwrap_or(0);
-            let before = trace.dcs.get(..mark).unwrap_or_default();
-            let base: HashMap<u64, i32> = before.iter().copied().collect();
+            let before = trace.edges.get(..mark).unwrap_or_default();
+            let base: HashMap<u64, Edges> = before.iter().map(|e| (e.idx, *e)).collect();
             let typical = typical_step(before, &base, cols);
             let b_src = last.src + (b - last.v);
 
@@ -305,7 +317,7 @@ impl Search<'_> {
                         continue;
                     }
                     if *budget == 0 {
-                        return best.map(|x| (x.2, x.3));
+                        return self.decide(best, &seen, strong);
                     }
                     *budget -= 1;
 
@@ -317,7 +329,7 @@ impl Search<'_> {
                     };
 
                     // A first glance: is the seam smooth at all?
-                    let mut dcs = Vec::new();
+                    let mut edges = Vec::new();
                     let glance = Some(b + opts.glance);
                     let first = jpeg::decode(
                         self.plan,
@@ -326,19 +338,19 @@ impl Search<'_> {
                         self.limit,
                         glance,
                         None,
-                        Some(&mut dcs),
+                        Some(&mut edges),
                     );
                     if let Outcome::Fail(Stop::Corrupt(at)) = first
                         && at.saturating_sub(b) < opts.min_progress
                     {
                         continue;
                     }
-                    if seam(&dcs, &base, cols, typical).is_some_and(|x| x > opts.max_seam) {
+                    if seam(&edges, &base, cols, typical).is_some_and(|x| x > opts.max_seam) {
                         continue;
                     }
 
                     // Then the whole window.
-                    dcs.clear();
+                    edges.clear();
                     let cap = Some(b + opts.window);
                     let outcome = jpeg::decode(
                         self.plan,
@@ -347,7 +359,7 @@ impl Search<'_> {
                         self.limit,
                         cap,
                         None,
-                        Some(&mut dcs),
+                        Some(&mut edges),
                     );
                     let (progress, settled) = match outcome {
                         Outcome::Done(end) if is_eoi(&mut sp, end) => (u64::MAX, true),
@@ -358,13 +370,14 @@ impl Search<'_> {
                     if progress < opts.min_progress {
                         continue;
                     }
-                    let Some(roughness) = seam(&dcs, &base, cols, typical) else {
+                    let Some(roughness) = seam(&edges, &base, cols, typical) else {
                         continue;
                     };
                     if roughness > opts.max_seam {
                         continue;
                     }
-                    if settled && roughness <= opts.good_seam {
+                    seen.push((roughness, s));
+                    if strong && settled && roughness <= opts.good_seam {
                         return Some((b, s));
                     }
                     let better = best
@@ -375,40 +388,76 @@ impl Search<'_> {
                 }
             }
         }
-        best.map(|x| (x.2, x.3))
+        self.decide(best, &seen, strong)
+    }
+
+    /// Takes the best candidate unless, without restart markers, another place on the disk
+    /// fits almost as well.
+    fn decide(
+        &self,
+        best: Option<(f64, u64, u64, u64)>,
+        seen: &[(f64, u64)],
+        strong: bool,
+    ) -> Option<(u64, u64)> {
+        let (roughness, _, b, s) = best?;
+        if !strong {
+            let rival = seen
+                .iter()
+                .filter(|(_, at)| at.abs_diff(s) >= self.opts.vicinity)
+                .map(|(r, _)| *r)
+                .fold(f64::INFINITY, f64::min);
+            if roughness > self.opts.distinct * rival {
+                return None;
+            }
+        }
+        Some((b, s))
     }
 }
 
-/// How much neighboring block rows typically differ before the seam (median of the last
-/// few hundred vertical DC steps), floored so flat pictures still allow some change.
-fn typical_step(dcs: &[(u64, i32)], base: &HashMap<u64, i32>, cols: u64) -> f64 {
-    let mut steps: Vec<i32> = dcs
+/// Mean absolute difference between a block's top pixel row and the bottom row of the
+/// block above it: how well two blocks fit together vertically (Memon and Pal's boundary
+/// matching, on luminance).
+fn mismatch(below: &Edges, above: &Edges) -> f64 {
+    let sum: i32 = below
+        .top
+        .iter()
+        .zip(&above.bottom)
+        .map(|(a, b)| (i32::from(*a) - i32::from(*b)).abs())
+        .sum();
+    f64::from(sum) / 8.0
+}
+
+/// How well neighboring block rows typically fit before the seam (median over the last few
+/// hundred blocks), floored so flat pictures still allow some change.
+fn typical_step(edges: &[Edges], base: &HashMap<u64, Edges>, cols: u64) -> f64 {
+    let mut steps: Vec<f64> = edges
         .iter()
         .rev()
         .take(512)
-        .filter_map(|&(i, v)| Some((v - *base.get(&i.checked_sub(cols)?)?).abs()))
+        .filter_map(|e| Some(mismatch(e, base.get(&e.idx.checked_sub(cols)?)?)))
         .collect();
-    steps.sort_unstable();
-    let median = steps.get(steps.len() / 2).copied().unwrap_or(0);
-    f64::from(median.max(16))
+    steps.sort_by(f64::total_cmp);
+    steps.get(steps.len() / 2).copied().unwrap_or(0.0).max(2.0)
 }
 
-/// Median vertical DC step from the blocks decoded after the seam to the blocks right
-/// above them (decoded before it), relative to the photo's typical step. The median keeps
-/// real edges that happen to cross the seam from counting against the right candidate.
-/// `None` without enough pairs to judge.
-fn seam(trial: &[(u64, i32)], base: &HashMap<u64, i32>, cols: u64, typical: f64) -> Option<f64> {
-    let mut steps: Vec<i32> = trial
+/// Boundary mismatch between the blocks decoded after the seam and the blocks right above
+/// them (decoded before it), relative to the photo's typical mismatch. A trimmed mean: the
+/// worst tenth is dropped, so a few real edges that cross the seam do not count against
+/// the right candidate, while the misaligned shapes of another photo still do. `None`
+/// without enough pairs to judge.
+fn seam(trial: &[Edges], base: &HashMap<u64, Edges>, cols: u64, typical: f64) -> Option<f64> {
+    let mut steps: Vec<f64> = trial
         .iter()
-        .filter(|(i, _)| !base.contains_key(i))
-        .filter_map(|&(i, v)| Some((v - *base.get(&i.checked_sub(cols)?)?).abs()))
+        .filter(|e| !base.contains_key(&e.idx))
+        .filter_map(|e| Some(mismatch(e, base.get(&e.idx.checked_sub(cols)?)?)))
         .collect();
     if steps.len() < 8 {
         return None;
     }
-    steps.sort_unstable();
-    let median = steps.get(steps.len() / 2).copied().unwrap_or(0);
-    Some(f64::from(median) / typical)
+    steps.sort_by(f64::total_cmp);
+    let keep = steps.len() - steps.len() / 10;
+    let kept = steps.get(..keep).unwrap_or_default();
+    Some(kept.iter().sum::<f64>() / kept.len().max(1) as f64 / typical)
 }
 
 /// Source ranges already part of the file (they cannot be the continuation).
@@ -492,12 +541,17 @@ mod tests {
 
     #[test]
     fn seam_compares_with_the_row_above() {
+        let block = |idx: u64, level: i16| Edges {
+            idx,
+            top: [level; 8],
+            bottom: [level; 8],
+        };
         let cols = 8;
         // Two rows of a smooth picture before the seam, then a row after it.
-        let base: HashMap<u64, i32> = (0..16).map(|i| (i, 100 + i as i32)).collect();
-        let smooth: Vec<(u64, i32)> = (16..24).map(|i| (i, 100 + i as i32)).collect();
-        let jump: Vec<(u64, i32)> = (16..24).map(|i| (i, 900 + i as i32)).collect();
-        let t = 16.0;
+        let base: HashMap<u64, Edges> = (0..16).map(|i| (i, block(i, 100))).collect();
+        let smooth: Vec<Edges> = (16..24).map(|i| block(i, 102)).collect();
+        let jump: Vec<Edges> = (16..24).map(|i| block(i, 400)).collect();
+        let t = 4.0;
         assert!(seam(&smooth, &base, cols, t).unwrap() < 1.0);
         assert!(seam(&jump, &base, cols, t).unwrap() > 10.0);
     }
