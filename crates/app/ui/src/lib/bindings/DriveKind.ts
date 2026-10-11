@@ -3,4 +3,4 @@
 /**
  * What kind of device a drive is, in terms the user recognizes.
  */
-export type DriveKind = "sdCard" | "usbFlash" | "externalHdd" | "externalSsd" | "internalHdd" | "internalSsd" | "diskImage";
+export type DriveKind = "sdCard" | "usbFlash" | "externalHdd" | "externalSsd" | "internalHdd" | "internalSsd" | "diskImage" | "folder" | "externalDrive";

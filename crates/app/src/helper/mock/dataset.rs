@@ -222,6 +222,16 @@ pub fn drives() -> Vec<MockDrive> {
     ]
 }
 
+/// A disk image that behaves like the fake SD card.
+pub fn image(id: DriveId, name: String) -> MockDrive {
+    let mut drive = drives().swap_remove(0);
+    drive.drive.id = id;
+    drive.drive.kind = DriveKind::DiskImage;
+    drive.drive.name = name;
+    drive.device = "image";
+    drive
+}
+
 const DESTINATIONS: &[MockDestination] = &[
     MockDestination {
         id: "backup",

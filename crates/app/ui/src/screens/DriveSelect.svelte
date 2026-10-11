@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { open } from '@tauri-apps/plugin-dialog';
   import { api } from '../lib/api';
   import type { Drive } from '../lib/bindings/Drive';
   import { driveIcon, errorText } from '../lib/display';
@@ -33,6 +34,19 @@
     void load();
   });
 
+  async function openImage() {
+    try {
+      const path = await open({ multiple: false, directory: false });
+      if (typeof path !== 'string') return;
+      const drive = await api.openImage(path);
+      drives = await api.listDrives();
+      failed = false;
+      pickedId = drive.id;
+    } catch (err) {
+      showToast(errorText(err), 'error');
+    }
+  }
+
   async function start() {
     if (!picked) return;
     starting = true;
@@ -62,7 +76,7 @@
 <div class="page">
   <header>
     <div class="brand"><Logo /></div>
-    <button type="button" class="link" onclick={() => showToast(t('common.notAvailable'))}>
+    <button type="button" class="link" onclick={openImage}>
       <Icon name="file" />
       {t('driveSelect.openImage')}
     </button>

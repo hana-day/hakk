@@ -65,7 +65,9 @@
           {:else if minutes < 1}{t('progress.remainingUnderMinute')}
           {:else}<Msg key="progress.remaining" params={{ minutes }} />{/if}
         </span>
-        <span class="num">{t('progress.rate', { rate: formatBytes(progress.bytesPerSecond, 0) })}</span>
+        {#if progress.bytesPerSecond > 0}
+          <span class="num">{t('progress.rate', { rate: formatBytes(progress.bytesPerSecond, 0) })}</span>
+        {/if}
       {/if}
       <span class="num percent">{percent}%</span>
     </div>

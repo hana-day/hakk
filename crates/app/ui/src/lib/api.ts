@@ -16,6 +16,7 @@ export const HELPER_EVENT = 'helper-event';
 
 export const api = {
   listDrives: () => invoke<Drive[]>('list_drives'),
+  openImage: (path: string) => invoke<Drive>('open_image', { path }),
   listDestinations: (source: DriveId) => invoke<Destination[]>('list_destinations', { source }),
   startScan: (drive: DriveId) => invoke<ScanId>('start_scan', { drive }),
   pauseScan: (scan: ScanId) => invoke<null>('pause_scan', { scan }),

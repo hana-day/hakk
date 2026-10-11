@@ -16,6 +16,8 @@ export const ja = {
     internalHdd: '内蔵HDD',
     internalSsd: '内蔵SSD',
     diskImage: 'ディスクイメージ',
+    folder: 'フォルダ',
+    externalDrive: '外付けドライブ',
   },
   driveWarning: {
     trimLikely: 'SSDは復元できない可能性が高いです',
@@ -29,7 +31,7 @@ export const ja = {
     doNotSave: '復元が終わるまで、このドライブに保存しないでください',
     start: 'スキャンを開始',
     loading: 'ドライブを探しています…',
-    empty: 'ドライブが見つかりません。SDカードや外付けHDDをつないでから、再読み込みしてください。',
+    empty: 'ドライブが見つかりません。SDカードや外付けHDDをつないで再読み込みするか、ディスクイメージを開いてください。',
     loadFailed: 'ドライブの一覧を読み込めませんでした。',
   },
   header: {
@@ -220,6 +222,8 @@ export const ja = {
     fileNotFound: 'ファイルが見つかりません。',
     nothingRequested: '復元するファイルを選んでください。',
     recoveryInProgress: '前の復元が終わるまでお待ちください。',
+    cannotOpen: 'ファイルを開けませんでした。',
+    notAvailable: 'この機能はまだ使えません。',
     internal: '問題が起きました。もう一度お試しください。',
   },
 };

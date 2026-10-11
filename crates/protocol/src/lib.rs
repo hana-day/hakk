@@ -45,6 +45,10 @@ pub enum DriveKind {
     InternalHdd,
     InternalSsd,
     DiskImage,
+    /// A folder on some drive (used for destinations).
+    Folder,
+    /// A drive whose kind is not known (used for destinations).
+    ExternalDrive,
 }
 
 /// Something the user should know before scanning a drive.
@@ -459,8 +463,47 @@ pub enum HelperError {
     NothingRequested,
     #[error("a recovery is already running")]
     RecoveryInProgress,
+    #[error("cannot open: {detail}")]
+    CannotOpen { detail: String },
+    /// The helper does not offer this yet (e.g. video repair).
+    #[error("not available")]
+    NotAvailable,
     #[error("internal error: {detail}")]
     Internal { detail: String },
+}
+
+/// Receives events from the helper. Called from a helper thread, so it must not block.
+pub type EventSink = Box<dyn Fn(HelperEvent) + Send + Sync>;
+
+/// What the GUI can ask of the helper. Requests are method calls; everything the helper
+/// reports on its own (progress, found files, results) arrives as [`HelperEvent`]s through
+/// the [`EventSink`] given when the helper is created.
+pub trait Helper: Send + Sync {
+    /// Drives that can be scanned, including disk images opened so far.
+    fn list_drives(&self) -> Result<Vec<Drive>, HelperError>;
+
+    /// Adds a disk image file as a drive that can be scanned.
+    fn open_image(&self, path: &str) -> Result<Drive, HelperError>;
+
+    /// Places recovered files can be written to while `source` is scanned. Destinations on
+    /// the same device as `source` are listed, but blocked.
+    fn list_destinations(&self, source: &DriveId) -> Result<Vec<Destination>, HelperError>;
+
+    /// Starts a scan. Any previous scan is cancelled.
+    fn start_scan(&self, drive: &DriveId) -> Result<ScanId, HelperError>;
+
+    fn pause_scan(&self, scan: ScanId) -> Result<(), HelperError>;
+
+    fn resume_scan(&self, scan: ScanId) -> Result<(), HelperError>;
+
+    /// Stops a scan for good. Files found so far remain available.
+    fn cancel_scan(&self, scan: ScanId) -> Result<(), HelperError>;
+
+    /// Copies files to a destination. A running scan is paused until the copy finishes.
+    fn recover(&self, request: RecoveryRequest) -> Result<RecoveryId, HelperError>;
+
+    /// Writes a repaired copy of a video to a destination.
+    fn repair(&self, request: RepairRequest) -> Result<(), HelperError>;
 }
 
 /// All types the GUI needs bindings for. Exporting these exports their dependencies too.

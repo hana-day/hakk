@@ -17,14 +17,14 @@ use std::thread;
 use std::time::Duration;
 
 use hakk_protocol::{
-    Destination, DestinationId, DiskMap, Drive, DriveId, FileId, FileKind, FileMerge, FileStatus,
-    FileUpdate, FilesFound, FilesMerged, FilesUpdated, FoundFile, HelperError, HelperEvent,
-    MapCell, RecoveryId, RecoveryProgress, RecoveryReport, RecoveryRequest, RepairReport,
-    RepairRequest, RetryProgress, ScanId, ScanProgress, ScanStage, ScanState, ScanSummary,
+    Destination, DestinationId, DiskMap, Drive, DriveId, EventSink, FileId, FileKind, FileMerge,
+    FileStatus, FileUpdate, FilesFound, FilesMerged, FilesUpdated, FoundFile, Helper, HelperError,
+    HelperEvent, MapCell, RecoveryId, RecoveryProgress, RecoveryReport, RecoveryRequest,
+    RepairReport, RepairRequest, RetryProgress, ScanId, ScanProgress, ScanStage, ScanState,
+    ScanSummary,
 };
 
 use self::dataset::{MockDrive, PlannedFile, Reveal, Rng};
-use super::{EventSink, Helper};
 
 /// Number of cells in the disk map (48 columns by 12 rows in the GUI).
 const MAP_CELLS: u32 = 576;
@@ -91,6 +91,10 @@ fn lock(sim: &Mutex<Sim>) -> std::sync::MutexGuard<'_, Sim> {
 impl Helper for MockHelper {
     fn list_drives(&self) -> Result<Vec<Drive>, HelperError> {
         Ok(self.with(|s| s.drives.iter().map(|d| d.drive.clone()).collect()))
+    }
+
+    fn open_image(&self, path: &str) -> Result<Drive, HelperError> {
+        self.with(|s| s.open_image(path))
     }
 
     fn list_destinations(&self, source: &DriveId) -> Result<Vec<Destination>, HelperError> {
@@ -183,6 +187,21 @@ impl Sim {
             recovery: None,
             repairs: Vec::new(),
         }
+    }
+
+    /// Adds an "image" that behaves like the fake SD card, named after the file.
+    fn open_image(&mut self, path: &str) -> Result<Drive, HelperError> {
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| HelperError::CannotOpen {
+                detail: "not a file path".into(),
+            })?;
+        let id = DriveId(format!("image-{}", self.drives.len()));
+        let drive = dataset::image(id, name);
+        let out = drive.drive.clone();
+        self.drives.push(drive);
+        Ok(out)
     }
 
     fn drive(&self, id: &DriveId) -> Result<&MockDrive, HelperError> {

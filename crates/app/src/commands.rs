@@ -4,11 +4,10 @@
 //! blocks the window's event loop.
 
 use hakk_protocol::{
-    Destination, Drive, DriveId, HelperError, RecoveryId, RecoveryRequest, RepairRequest, ScanId,
+    Destination, Drive, DriveId, Helper, HelperError, RecoveryId, RecoveryRequest, RepairRequest,
+    ScanId,
 };
 use tauri::State;
-
-use crate::helper::Helper;
 
 /// The helper connection, shared by all commands.
 pub struct HelperState(pub Box<dyn Helper>);
@@ -16,6 +15,11 @@ pub struct HelperState(pub Box<dyn Helper>);
 #[tauri::command(async)]
 pub fn list_drives(helper: State<'_, HelperState>) -> Result<Vec<Drive>, HelperError> {
     helper.0.list_drives()
+}
+
+#[tauri::command(async)]
+pub fn open_image(helper: State<'_, HelperState>, path: String) -> Result<Drive, HelperError> {
+    helper.0.open_image(&path)
 }
 
 #[tauri::command(async)]

@@ -1,0 +1,26 @@
+[package]
+name = "hakk-helper"
+description = "The helper: runs scans over the read layer and serves the GUI's requests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+blocksource = { path = "../blocksource" }
+crossbeam-channel = "0.5.17"
+hakk-protocol = { path = "../protocol" }
+index = { path = "../index" }
+scan = { path = "../scan" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
