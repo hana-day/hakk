@@ -4,6 +4,10 @@
 //! so only sector starts are checked for headers. After a complete file the scan resumes
 //! after it; after a broken one it resumes at the next sector, since the rest of the data
 //! may belong to other files.
+//!
+//! Broken JPEGs are reassembled after the whole source has been scanned, so the search for
+//! their missing pieces can skip every file found whole: on a full disk that is most of
+//! the data.
 
 use blocksource::BlockSource;
 
@@ -66,7 +70,7 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
             let hit = if looks_like_header(head)
                 && !claimed.iter().any(|&(o, l)| (o..o + l).contains(&at))
             {
-                carve_at(&mut parse, at, opts)
+                carve_at_with(&mut parse, at, opts, false)
             } else {
                 None
             };
@@ -88,7 +92,71 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
         .flat_map(|f| f.claimed().iter().skip(1).copied())
         .collect();
     found.retain(|f| !inner.iter().any(|&(o, l)| (o..o + l).contains(&f.offset)));
+    drop_echoes(&mut found);
+    if let Some(o) = &opts.reassemble {
+        reassemble_broken(&mut parse, &mut found, opts.max_jpeg, o);
+    }
     found
+}
+
+/// Drops broken JPEGs that are the tail of another broken JPEG found before them: they
+/// start inside it and break at the same place, so they are the same picture read from a
+/// later `FF D8` (Canon ends the Exif segment with those bytes, on a sector boundary).
+fn drop_echoes(found: &mut Vec<Found>) {
+    let breaks: Vec<(u64, u64, u64)> = found
+        .iter()
+        .filter(|f| f.kind == Kind::Jpeg)
+        .filter_map(|f| match f.status {
+            Status::Corrupt { at } => Some((f.offset, f.offset + f.len, at)),
+            _ => None,
+        })
+        .collect();
+    found.retain(|f| {
+        let Status::Corrupt { at } = f.status else {
+            return true;
+        };
+        f.kind != Kind::Jpeg
+            || !breaks
+                .iter()
+                .any(|&(o, e, b)| o < f.offset && f.offset < e && b == at)
+    });
+}
+
+/// Reassembles the broken JPEGs in `found`, looking for their pieces outside the files
+/// found whole.
+fn reassemble_broken<S: BlockSource + ?Sized>(
+    r: &mut Reader<S>,
+    found: &mut [Found],
+    max_len: u64,
+    o: &fragments::Options,
+) {
+    let mut taken: Vec<(u64, u64)> = found
+        .iter()
+        .filter(|f| f.status == Status::Complete)
+        .flat_map(|f| f.fragments.iter().map(|&(at, len)| (at, at + len)))
+        .collect();
+    taken.sort_unstable();
+    // Merge overlaps (a file inside another, e.g. a JPEG frame in a video).
+    let mut merged: Vec<(u64, u64)> = Vec::with_capacity(taken.len());
+    for (a, e) in taken {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((a, e)),
+        }
+    }
+    for f in found.iter_mut() {
+        if f.kind != Kind::Jpeg || !matches!(f.status, Status::Corrupt { .. }) {
+            continue;
+        }
+        let Some(joined) =
+            fragments::reassemble_avoiding(r, f.offset, max_len, o, &merged).filter(|j| j.complete)
+        else {
+            continue;
+        };
+        f.len = joined.fragments.iter().map(|x| x.1).sum();
+        f.fragments = joined.fragments;
+        f.status = Status::Complete;
+    }
 }
 
 /// Bytes from a sector start that [`looks_like_header`] wants (three 192-byte transport
@@ -128,6 +196,17 @@ pub fn carve_at<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
     at: u64,
     opts: &Options,
+) -> Option<Found> {
+    carve_at_with(r, at, opts, true)
+}
+
+/// [`carve_at`], reassembling a broken JPEG on the spot only if `jpeg_now` (otherwise the
+/// caller does it later, knowing more of the disk).
+fn carve_at_with<S: BlockSource + ?Sized>(
+    r: &mut Reader<S>,
+    at: u64,
+    opts: &Options,
+    jpeg_now: bool,
 ) -> Option<Found> {
     let head = r.slice(at, 8)?.to_vec();
     if r.slice(at, HEADER_LEN).is_some_and(mts::looks_like_mts) {
@@ -215,7 +294,7 @@ pub fn carve_at<S: BlockSource + ?Sized>(
         };
         let joined = opts
             .reassemble
-            .filter(|_| matches!(status, Status::Corrupt { .. }))
+            .filter(|_| jpeg_now && matches!(status, Status::Corrupt { .. }))
             .and_then(|o| fragments::reassemble(r, at, opts.max_jpeg, &o))
             .filter(|f| f.complete);
         let mut found = match joined {

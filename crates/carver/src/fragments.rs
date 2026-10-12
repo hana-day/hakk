@@ -42,6 +42,9 @@ pub struct Options {
     pub back: u64,
     /// How far from the end of a fragment (either way) to look for the next one.
     pub reach: u64,
+    /// Bytes decoded past a boundary for a first, lenient look: most candidates (data of
+    /// another kind, or another photo) fail or show a rough seam within this.
+    pub peek: u64,
     /// Bytes decoded past a boundary to judge a candidate's seam first; candidates with a
     /// rough seam are dropped before decoding further.
     pub glance: u64,
@@ -60,6 +63,10 @@ pub struct Options {
     pub distinct: f64,
     /// Candidates closer than this to the best one count as the same place.
     pub vicinity: u64,
+    /// Without restart markers, the search stops once this many places far apart fit with a
+    /// seam as smooth as `good_seam`: the photo cannot tell them apart (smooth or noise-like
+    /// content), so whatever won would be a guess.
+    pub ambiguous_after: usize,
     pub max_fragments: usize,
     /// Trial decodes allowed per file.
     pub budget: u32,
@@ -71,6 +78,7 @@ impl Default for Options {
             grid: 4096,
             back: 16 << 10,
             reach: 16 << 20,
+            peek: 512,
             glance: 2 << 10,
             window: 32 << 10,
             min_progress: 2048,
@@ -78,6 +86,7 @@ impl Default for Options {
             good_seam: 1.5,
             distinct: 0.9,
             vicinity: 256 << 10,
+            ambiguous_after: 8,
             max_fragments: 8,
             budget: 8_000,
         }
@@ -151,6 +160,20 @@ pub fn reassemble<S: BlockSource + ?Sized>(
     max_len: u64,
     opts: &Options,
 ) -> Option<Reassembled> {
+    reassemble_avoiding(r, start, max_len, opts, &[])
+}
+
+/// [`reassemble`], not looking for pieces inside `taken`: the source ranges of other files
+/// already found whole (sorted by start, not overlapping), which cannot hold this file's
+/// data. On a full disk most of the data is such files, so this saves most of the search
+/// and keeps it from settling on pieces of them.
+pub fn reassemble_avoiding<S: BlockSource + ?Sized>(
+    r: &mut Reader<S>,
+    start: u64,
+    max_len: u64,
+    opts: &Options,
+    taken: &[(u64, u64)],
+) -> Option<Reassembled> {
     let (j, plan) = jpeg::carve_with_plan(r, start, max_len)?;
     let plan = plan?;
     if !matches!(j.status, jpeg::Status::Corrupt { .. }) {
@@ -197,6 +220,7 @@ pub fn reassemble<S: BlockSource + ?Sized>(
             start,
             limit,
             opts,
+            taken,
         };
         let Some((b, s)) = search.best(r, &segs, &trace, fail_at, &mut budget, &mut filter) else {
             return Some(finish(&segs, fail_at, false));
@@ -254,11 +278,21 @@ struct Search<'p> {
     start: u64,
     limit: u64,
     opts: &'p Options,
+    /// Source ranges of other files found whole: sorted, not overlapping.
+    taken: &'p [(u64, u64)],
 }
 
 impl Search<'_> {
     /// Finds the boundary `b` (virtual) and continuation `s` (source) with the most natural
     /// seam among those that decode cleanly for a while.
+    /// Whether `s` lies in another file already found whole.
+    fn taken(&self, s: u64) -> bool {
+        let i = self.taken.partition_point(|&(a, _)| a <= s);
+        i.checked_sub(1)
+            .and_then(|i| self.taken.get(i))
+            .is_some_and(|&(_, e)| s < e)
+    }
+
     fn best<S: BlockSource + ?Sized>(
         &self,
         r: &mut Reader<S>,
@@ -288,10 +322,10 @@ impl Search<'_> {
         let len = r.len();
         let cols = self.plan.luma_cols.max(1);
         // (seam roughness, progress, b, s)
-        let mut best: Option<(f64, u64, u64, u64)> = None;
-        // Every acceptable candidate: (seam roughness, source offset).
-        let mut seen: Vec<(f64, u64)> = Vec::new();
         let strong = self.plan.has_restart();
+        // Per boundary, nearest the failure first: the decoder state just before it and the
+        // blocks above the seam.
+        let mut contexts = Vec::new();
         for &b in &boundaries {
             let i = trace.snaps.partition_point(|x| x.pos <= b);
             let Some(k) = i.checked_sub(1) else { continue };
@@ -302,18 +336,30 @@ impl Search<'_> {
             let before = trace.edges.get(..mark).unwrap_or_default();
             let base: HashMap<u64, Edges> = before.iter().map(|e| (e.idx, *e)).collect();
             let typical = typical_step(before, &base, cols);
-            let b_src = last.src + (b - last.v);
+            contexts.push((b, from, base, typical, last.src + (b - last.v)));
+        }
 
+        // The boundary nearest the failure first (where the cut usually is), each one with
+        // the nearest places first. Each boundary is decided on its own: candidates at a
+        // wrong boundary only blur the choice at the right one.
+        for (b, from, base, typical, b_src) in &contexts {
+            let (b, from, typical) = (*b, *from, *typical);
+            // (seam roughness, progress, b, s)
+            let mut best: Option<(f64, u64, u64, u64)> = None;
+            // Every acceptable candidate: (seam roughness, source offset).
+            let mut seen: Vec<(f64, u64)> = Vec::new();
             for step in 1..=(opts.reach / grid) {
                 let around = [
                     src_fail.checked_add(step * grid),
                     src_fail.checked_sub(step * grid),
                 ];
                 for s in around.into_iter().flatten().map(snap_to_grid) {
-                    if s >= len || s == b_src || used.iter().any(|(a, e)| (*a..*e).contains(&s)) {
-                        continue;
-                    }
-                    if !filter.clean(r, s, grid) {
+                    if s >= len
+                        || s == *b_src
+                        || used.iter().any(|(a, e)| (*a..*e).contains(&s))
+                        || self.taken(s)
+                        || !filter.clean(r, s, grid)
+                    {
                         continue;
                     }
                     if *budget == 0 {
@@ -328,24 +374,54 @@ impl Search<'_> {
                         segs: trial,
                     };
 
-                    // A first glance: is the seam smooth at all?
+                    // A first peek, judged leniently: does it decode, and is the seam not
+                    // plainly wrong?
                     let mut edges = Vec::new();
-                    let glance = Some(b + opts.glance);
-                    let first = jpeg::decode(
+                    let peek = jpeg::decode(
                         self.plan,
                         &mut sp,
                         from,
                         self.limit,
-                        glance,
+                        Some(b + opts.peek),
                         None,
                         Some(&mut edges),
                     );
-                    if let Outcome::Fail(Stop::Corrupt(at)) = first
-                        && at.saturating_sub(b) < opts.min_progress
+                    if let Outcome::Fail(Stop::Corrupt(at)) = peek
+                        && at.saturating_sub(b) < opts.peek
                     {
                         continue;
                     }
-                    if seam(&edges, &base, cols, typical).is_some_and(|x| x > opts.max_seam) {
+                    if seam(&edges, base, cols, typical).is_some_and(|x| x > opts.max_seam * 1.5) {
+                        continue;
+                    }
+
+                    // A glance: is the seam smooth at all? Longer if it takes more data to
+                    // see enough blocks below the seam (pictures that compress poorly).
+                    let mut reach = opts.glance;
+                    let rough = loop {
+                        edges.clear();
+                        let first = jpeg::decode(
+                            self.plan,
+                            &mut sp,
+                            from,
+                            self.limit,
+                            Some(b + reach),
+                            None,
+                            Some(&mut edges),
+                        );
+                        if let Outcome::Fail(Stop::Corrupt(at)) = first
+                            && at.saturating_sub(b) < opts.min_progress
+                        {
+                            break true;
+                        }
+                        let judged = seam(&edges, base, cols, typical);
+                        let ended = !matches!(first, Outcome::Capped);
+                        if judged.is_some() || ended || reach * 2 >= opts.window {
+                            break judged.is_some_and(|x| x > opts.max_seam);
+                        }
+                        reach *= 2;
+                    };
+                    if rough {
                         continue;
                     }
 
@@ -370,7 +446,7 @@ impl Search<'_> {
                     if progress < opts.min_progress {
                         continue;
                     }
-                    let Some(roughness) = seam(&edges, &base, cols, typical) else {
+                    let Some(roughness) = seam(&edges, base, cols, typical) else {
                         continue;
                     };
                     if roughness > opts.max_seam {
@@ -380,6 +456,9 @@ impl Search<'_> {
                     if strong && settled && roughness <= opts.good_seam {
                         return Some((b, s));
                     }
+                    if !strong && self.hopeless(&seen) {
+                        return None;
+                    }
                     let better = best
                         .is_none_or(|x| roughness < x.0 || (roughness == x.0 && progress > x.1));
                     if better {
@@ -387,8 +466,24 @@ impl Search<'_> {
                     }
                 }
             }
+            if let Some(found) = self.decide(best, &seen, strong) {
+                return Some(found);
+            }
         }
-        self.decide(best, &seen, strong)
+        None
+    }
+
+    /// Whether so many places far apart fit smoothly that the photo cannot tell the right
+    /// one (smooth or noise-like content): the choice would be a guess.
+    fn hopeless(&self, seen: &[(f64, u64)]) -> bool {
+        let mut places: Vec<u64> = seen
+            .iter()
+            .filter(|(r, _)| *r <= self.opts.good_seam)
+            .map(|(_, s)| s / self.opts.vicinity)
+            .collect();
+        places.sort_unstable();
+        places.dedup();
+        places.len() >= self.opts.ambiguous_after
     }
 
     /// Takes the best candidate unless, without restart markers, another place on the disk
