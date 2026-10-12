@@ -2,10 +2,14 @@
 //!
 //! macOS: whole physical disks from `diskutil list -plist physical`, described by
 //! `diskutil info -plist` (model, size, internal or external, SSD or not, bus). They are
-//! read through the raw device `/dev/rdiskN`, which bypasses the buffer cache. Other
-//! systems list none yet.
+//! read through the raw device `/dev/rdiskN`, which bypasses the buffer cache. Opening it
+//! needs administrator rights, and even root is refused by the system's privacy
+//! protection unless the app responsible has Full Disk Access; so the device is opened by
+//! `authopen`, which asks for the administrator password and hands the open (read-only)
+//! file back. Other systems list none yet.
 //!
-//! Reference: diskutil(8) (`list`, `info`, `-plist` output keys).
+//! Reference: diskutil(8) (`list`, `info`, `-plist` output keys); authopen(1)
+//! (`-stdoutpipe`); unix(4) and recvmsg(2) (`SCM_RIGHTS`).
 
 use std::path::PathBuf;
 
@@ -53,6 +57,17 @@ pub(crate) fn disk_of(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Opens a raw device read-only: directly if this process may, otherwise (macOS) through
+/// `authopen`, which asks for the administrator password. `PermissionDenied` if the user
+/// declines.
+pub(crate) fn open_device(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    match std::fs::File::open(path) {
+        #[cfg(target_os = "macos")]
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => mac::authopen(path),
+        other => other,
+    }
+}
+
 /// Whether `id` names a physical drive (as opposed to a disk image).
 pub(crate) fn is_physical(id: &DriveId) -> bool {
     id.0.starts_with(ID_PREFIX)
@@ -96,7 +111,13 @@ fn drive(
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use std::{path::Path, process::Command};
+    use std::{
+        fs::File,
+        io,
+        os::fd::{AsRawFd, FromRawFd, OwnedFd},
+        path::Path,
+        process::{Command, Stdio},
+    };
 
     use plist::{Dictionary, Value};
 
@@ -265,6 +286,79 @@ mod mac {
             .map(|&c| c.to_ne_bytes()[0])
             .collect();
         String::from_utf8(name).ok()
+    }
+
+    /// Opens `path` read-only through `/usr/libexec/authopen -stdoutpipe`: it asks for
+    /// authorization (the administrator password) and sends the open descriptor back over
+    /// a socket.
+    pub(super) fn authopen(path: &Path) -> io::Result<File> {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `fds` has room for the two descriptors socketpair writes.
+        if unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: socketpair succeeded, so both descriptors are open and owned by us alone.
+        let (ours, theirs) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let mut child = Command::new("/usr/libexec/authopen")
+            .arg("-stdoutpipe")
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(theirs))
+            .spawn()?;
+        let received = receive_fd(&ours);
+        let status = child.wait()?;
+        match received? {
+            Some(fd) => Ok(File::from(fd)),
+            None if status.success() => Err(io::Error::other("authopen sent no file")),
+            // authopen exits with an error when the user cancels the password prompt.
+            None => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("authopen refused {}", path.display()),
+            )),
+        }
+    }
+
+    /// Receives one descriptor sent with `SCM_RIGHTS` on `socket`; `None` if the other side
+    /// closed without sending one.
+    fn receive_fd(socket: &OwnedFd) -> io::Result<Option<OwnedFd>> {
+        let mut data = [0u8; 64];
+        let mut iov = libc::iovec {
+            iov_base: data.as_mut_ptr().cast(),
+            iov_len: data.len(),
+        };
+        // Room for one control message carrying one int, suitably aligned.
+        let mut control = [0u64; 8];
+        // SAFETY: an all-zero msghdr is valid; the fields used are set below.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &raw mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen =
+            libc::socklen_t::try_from(std::mem::size_of_val(&control)).map_err(io::Error::other)?;
+        // SAFETY: `msg` points at buffers that live for the call and whose sizes it states.
+        let n = unsafe { libc::recvmsg(socket.as_raw_fd(), &raw mut msg, 0) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: recvmsg filled `msg`; CMSG_FIRSTHDR reads only within its control buffer.
+        let cmsg = unsafe { libc::CMSG_FIRSTHDR(&raw const msg) };
+        if cmsg.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: `cmsg` is non-null and points into `control`.
+        let header = unsafe { &*cmsg };
+        if header.cmsg_level != libc::SOL_SOCKET || header.cmsg_type != libc::SCM_RIGHTS {
+            return Ok(None);
+        }
+        // SAFETY: an SCM_RIGHTS message carries at least one int (a descriptor) as its data;
+        // read_unaligned copes with the data's alignment.
+        let fd = unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>()) };
+        if fd < 0 {
+            return Ok(None);
+        }
+        // SAFETY: the kernel installed `fd` in this process for us; nothing else owns it.
+        Ok(Some(unsafe { OwnedFd::from_raw_fd(fd) }))
     }
 
     pub(super) fn disk_of(path: &Path) -> Option<String> {

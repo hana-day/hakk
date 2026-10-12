@@ -75,7 +75,11 @@ pub fn serve(
                 continue;
             }
         };
+        let call = format!("{:?}", request.call);
         let result = dispatch(&helper, request.call);
+        if let Err(e) = &result {
+            eprintln!("helper: {call} failed: {e:?}");
+        }
         send(
             &writer,
             &HelperMessage::Reply {

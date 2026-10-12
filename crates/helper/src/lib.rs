@@ -16,6 +16,7 @@ mod convert;
 mod drives;
 mod places;
 mod recovery;
+mod rejoin;
 #[cfg(unix)]
 pub mod remote;
 
@@ -50,6 +51,53 @@ type PlaceLister = Box<dyn Fn(Option<&str>) -> Vec<Destination> + Send + Sync>;
 /// A drive opened for reading: the source, its label, and the whole physical disk if it
 /// is one.
 type Opened = (Arc<dyn BlockSource>, String, Option<String>);
+
+/// Where a drive's data is.
+enum Target {
+    Device {
+        path: PathBuf,
+        label: String,
+        disk: String,
+    },
+    Image {
+        path: PathBuf,
+        label: String,
+    },
+}
+
+impl Target {
+    /// Opens it for reading. A physical drive may ask for the administrator password.
+    fn open(self) -> Result<Opened, HelperError> {
+        match self {
+            Target::Device { path, label, disk } => {
+                let device = drives::open_device(&path)
+                    .and_then(Device::from_file)
+                    .map_err(|e| {
+                        eprintln!(
+                            "helper: cannot open {}: {e} ({:?})",
+                            path.display(),
+                            e.raw_os_error()
+                        );
+                        if e.kind() == std::io::ErrorKind::PermissionDenied {
+                            HelperError::AdminRequired
+                        } else {
+                            HelperError::CannotOpen {
+                                detail: format!("{}: {e}", path.display()),
+                            }
+                        }
+                    })?;
+                // Raw devices take only sector-aligned reads.
+                Ok((Arc::new(Aligned::new(device)), label, Some(disk)))
+            }
+            Target::Image { path, label } => {
+                let source = ImageFile::open(&path).map_err(|e| HelperError::CannotOpen {
+                    detail: e.to_string(),
+                })?;
+                Ok((Arc::new(source), label, None))
+            }
+        }
+    }
+}
 
 /// Where scans are saved by default: the app's data folder of the current user.
 pub fn default_data_dir() -> PathBuf {
@@ -95,6 +143,10 @@ fn saved_scan(path: &Path) -> Option<SavedScan> {
 
 /// How often the index is read for new and changed files.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How often duplicates are merged while scanning. Merging scans every carved record and
+/// holds the index's write lock meanwhile, which delays the scan's saving (and with it
+/// the report that a pause took effect); it is done once more when the scan ends.
+const MERGE_INTERVAL: Duration = Duration::from_secs(10);
 
 pub struct RealHelper {
     shared: Arc<Shared>,
@@ -266,31 +318,22 @@ impl State {
             .ok_or(HelperError::DriveNotFound)
     }
 
-    /// Opens a drive for reading: `(source, label, whole disk if physical)`.
-    fn open(&self, id: &DriveId) -> Result<Opened, HelperError> {
+    /// What to open to read a drive (opening may wait for a password, so it is done
+    /// without holding the state).
+    fn target(&self, id: &DriveId) -> Result<Target, HelperError> {
         if drives::is_physical(id) {
             let disk = self.disk(id)?;
-            let device = Device::open(&disk.device).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    HelperError::AdminRequired
-                } else {
-                    HelperError::CannotOpen {
-                        detail: format!("{}: {e}", disk.device.display()),
-                    }
-                }
-            })?;
-            // Raw devices take only sector-aligned reads.
-            return Ok((
-                Arc::new(Aligned::new(device)),
-                disk.drive.name.clone(),
-                Some(disk.disk.clone()),
-            ));
+            return Ok(Target::Device {
+                path: disk.device.clone(),
+                label: disk.drive.name.clone(),
+                disk: disk.disk.clone(),
+            });
         }
         let image = self.image(id)?;
-        let source = ImageFile::open(&image.path).map_err(|e| HelperError::CannotOpen {
-            detail: e.to_string(),
-        })?;
-        Ok((Arc::new(source), image.drive.name.clone(), None))
+        Ok(Target::Image {
+            path: image.path.clone(),
+            label: image.drive.name.clone(),
+        })
     }
 
     fn scan(&self, id: ScanId) -> Result<&ActiveScan, HelperError> {
@@ -391,9 +434,15 @@ impl Helper for RealHelper {
     }
 
     fn start_scan(&self, drive: &DriveId, fresh: bool) -> Result<ScanId, HelperError> {
+        let (target, index_path) = {
+            let state = self.shared.state();
+            (
+                state.target(drive)?,
+                self.shared.index_path(&state.identity(drive)?),
+            )
+        };
+        let (source, label, disk) = target.open()?;
         let mut state = self.shared.state();
-        let (source, label, disk) = state.open(drive)?;
-        let index_path = self.shared.index_path(&state.identity(drive)?);
         if let Some(previous) = state.scan.take() {
             previous.handle.cancel();
         }
@@ -441,6 +490,8 @@ impl Helper for RealHelper {
             poller: Poller::new(index_path.clone()),
             ended: ended.clone(),
             read_errors: 0,
+            source: source.clone(),
+            index_path: index_path.clone(),
         };
         thread::Builder::new()
             .name(format!("helper-pump-{}", id.0))
@@ -542,6 +593,8 @@ struct Pump {
     poller: Poller,
     ended: Arc<AtomicBool>,
     read_errors: u32,
+    source: Arc<dyn BlockSource>,
+    index_path: PathBuf,
 }
 
 impl Pump {
@@ -558,6 +611,7 @@ impl Pump {
                     eprintln!("analyzer {analyzer} panicked at {offset:?}; scanning continues");
                 }
                 Ok(Event::Finished(summary)) => {
+                    self.poller.merge_now();
                     self.poll();
                     self.ended.store(true, Ordering::Release);
                     let report = self.poller.summary(
@@ -567,6 +621,9 @@ impl Pump {
                         self.read_errors,
                     );
                     self.shared.emit(HelperEvent::ScanFinished(report));
+                    if summary.outcome != Outcome::Cancelled {
+                        self.rejoin();
+                    }
                     return;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -580,6 +637,25 @@ impl Pump {
                 self.poll();
                 next_poll = Instant::now() + POLL_INTERVAL;
             }
+        }
+    }
+
+    /// Puts broken JPEGs back together now that the whole disk is known, and reports the
+    /// ones that became recoverable. Stops if another scan starts.
+    fn rejoin(&mut self) {
+        let id = self.scan_id;
+        let shared = self.shared.clone();
+        let replaced = move || shared.state().scan.as_ref().is_none_or(|s| s.id != id);
+        let started = Instant::now();
+        match rejoin::rejoin_jpegs(&self.index_path, self.source.as_ref(), &replaced) {
+            Ok(n) => {
+                eprintln!(
+                    "helper: rejoined {n} fragmented JPEGs in {:.1} s",
+                    started.elapsed().as_secs_f64()
+                );
+                self.poll();
+            }
+            Err(err) => eprintln!("helper: cannot rejoin fragmented JPEGs: {err}"),
         }
     }
 
@@ -631,6 +707,8 @@ struct Poller {
     /// Every record seen so far, as last reported.
     known: HashMap<i64, Known>,
     folders: HashMap<i64, Vec<String>>,
+    /// When duplicates were last merged.
+    last_merge: Option<Instant>,
 }
 
 struct Known {
@@ -646,7 +724,13 @@ impl Poller {
             last_rev: 0,
             known: HashMap::new(),
             folders: HashMap::new(),
+            last_merge: None,
         }
+    }
+
+    /// Merges duplicates on the next poll (when the scan has ended).
+    fn merge_now(&mut self) {
+        self.last_merge = None;
     }
 
     fn poll(&mut self) -> Result<Changes, index::Error> {
@@ -657,10 +741,16 @@ impl Poller {
             return Ok(Changes::default());
         };
         // Fold carving results into the named records they duplicate, so the merge shows
-        // up while scanning. It writes while the scan also writes; if it loses the race
-        // for the lock it is simply retried on the next poll. Merges bump the revision, so
-        // they are picked up below.
-        let _ = index.merge_duplicates();
+        // up while scanning (every MERGE_INTERVAL). It writes while the scan also writes;
+        // if it loses the race for the lock it is simply retried later. Merges bump the
+        // revision, so they are picked up below.
+        if self
+            .last_merge
+            .is_none_or(|t| t.elapsed() >= MERGE_INTERVAL)
+        {
+            self.last_merge = Some(Instant::now());
+            let _ = index.merge_duplicates();
+        }
 
         let records = index.files(&Query {
             changed_after: Some(self.last_rev),

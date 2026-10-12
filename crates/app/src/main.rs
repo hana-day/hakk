@@ -18,8 +18,9 @@ use crate::helper::mock::{MockConfig, MockHelper};
 const HELPER_EVENT: &str = "helper-event";
 
 /// `HAKK_HELPER=mock` runs the GUI against simulated drives instead of the real helper;
-/// `HAKK_HELPER=inprocess` runs the real helper inside the GUI without asking for
-/// administrator privileges (disk images only, unless the GUI itself runs as root).
+/// `HAKK_HELPER=elevated` runs the real helper as a separate process with administrator
+/// privileges (asked for at startup). By default it runs inside the GUI and opens drives
+/// through macOS's `authopen`, which asks for the administrator password when needed.
 const HELPER_ENV: &str = "HAKK_HELPER";
 
 /// Text of the administrator password prompt.
@@ -64,8 +65,10 @@ fn helper(sink: &dyn Fn() -> EventSink) -> Box<dyn Helper> {
 /// prompt was declined, or the system has no such helper yet).
 #[cfg(target_os = "macos")]
 fn elevated(sink: &dyn Fn() -> EventSink, mode: &str) -> Option<Box<dyn Helper>> {
+    // Drives are opened through authopen by the helper in the GUI; a separate elevated
+    // helper is only started when asked for.
     // SAFETY: geteuid cannot fail and has no preconditions.
-    if mode == "inprocess" || unsafe { libc::geteuid() } == 0 {
+    if mode != "elevated" || unsafe { libc::geteuid() } == 0 {
         return None;
     }
     match hakk_helper::remote::RemoteHelper::launch_elevated(sink(), ELEVATION_PROMPT) {

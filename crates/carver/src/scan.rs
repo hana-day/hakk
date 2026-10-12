@@ -200,9 +200,10 @@ pub fn carve_at<S: BlockSource + ?Sized>(
     carve_at_with(r, at, opts, true)
 }
 
-/// [`carve_at`], reassembling a broken JPEG on the spot only if `jpeg_now` (otherwise the
-/// caller does it later, knowing more of the disk).
-fn carve_at_with<S: BlockSource + ?Sized>(
+/// [`carve_at`], reassembling a broken JPEG on the spot only if `jpeg_now`. Otherwise the
+/// caller does it later with [`fragments::reassemble_avoiding`], knowing more of the disk
+/// (and without holding up a scan: the search can take a while per file).
+pub fn carve_at_with<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
     at: u64,
     opts: &Options,

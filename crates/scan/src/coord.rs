@@ -180,11 +180,13 @@ impl Coordinator {
                 if state == RunState::Running {
                     // Do not let the pause drag the speed down.
                     self.rate.reset();
-                } else {
+                }
+                // Tell the GUI first: saving can take a moment.
+                self.emit_progress();
+                if state != RunState::Running {
                     // Pausing is a natural moment to save; the app may be closed next.
                     self.checkpoint();
                 }
-                self.emit_progress();
             }
             CoordMsg::Phase(phase) => {
                 self.phase = phase;

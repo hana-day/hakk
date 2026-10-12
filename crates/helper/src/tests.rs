@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
-use hakk_protocol::{Destination, DestinationId, FileOrigin, Helper, HelperEvent, RecoveryRequest};
+use hakk_protocol::{
+    Destination, DestinationId, FileOrigin, FileStatus, Helper, HelperEvent, RecoveryRequest,
+};
 use scan::{Analyzer, Block, Context};
 
 use super::*;
@@ -341,4 +343,83 @@ fn recovers_a_scenario_image() {
         }
     }
     assert!(matched > 0, "nothing recovered intact");
+}
+
+/// A smooth picture as a real baseline JPEG.
+fn photo(w: u32, h: u32) -> Vec<u8> {
+    let pixels: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            [
+                (x * 255 / w) as u8,
+                (y * 255 / h) as u8,
+                ((x + y) % 256) as u8,
+            ]
+        })
+        .collect();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92)
+        .encode(&pixels, w, h, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
+#[test]
+fn a_fragmented_jpeg_is_rejoined_after_the_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let jpeg = photo(640, 480);
+    assert!(jpeg.len() > 3 * 4096, "too small to split: {}", jpeg.len());
+    // The JPEG at 64 KiB, cut after two 4 KiB clusters, with noise in between.
+    let cut = 2 * 4096;
+    let mut x = 0x9E37_79B9u32;
+    let noise: Vec<u8> = (0..3 * 4096)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x as u8
+        })
+        .collect();
+    let mut image = vec![0u8; 64 << 10];
+    image.extend(&jpeg[..cut]);
+    image.extend(&noise);
+    image.extend(&jpeg[cut..]);
+    image.resize(image.len().div_ceil(1 << 20) * (1 << 20), 0);
+    let path = dir.path().join("frag.img");
+    std::fs::write(&path, &image).unwrap();
+
+    let (tx, events) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    let helper = RealHelper::with_options(
+        Box::new(move |e| {
+            let _ = tx.lock().unwrap().send(e);
+        }),
+        Arc::new(scan::analyzers::default_set),
+        dir.path().join("work"),
+        Box::new(|_| Vec::new()),
+    );
+    let drive = helper.open_image(&path.to_string_lossy()).unwrap();
+    helper.start_scan(&drive.id, true).unwrap();
+    let seen = until(&events, |e| matches!(e, HelperEvent::ScanFinished(_)));
+    let jpeg_file = seen
+        .iter()
+        .flat_map(|e| match e {
+            HelperEvent::FilesFound(f) => f.files.clone(),
+            _ => Vec::new(),
+        })
+        .find(|f| f.offset == Some(64 << 10))
+        .expect("the JPEG was found");
+    assert_eq!(jpeg_file.status, FileStatus::PartiallyDamaged);
+
+    // After the scan, the fragments are found and the file becomes recoverable.
+    let updates = until(&events, |e| matches!(e, HelperEvent::FilesUpdated(_)));
+    let Some(HelperEvent::FilesUpdated(u)) = updates.last() else {
+        panic!("no update");
+    };
+    assert!(
+        u.updates
+            .iter()
+            .any(|f| f.id == jpeg_file.id && f.status == FileStatus::Recoverable),
+        "{u:?}"
+    );
 }

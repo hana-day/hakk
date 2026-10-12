@@ -361,6 +361,28 @@ impl Index {
         Ok(())
     }
 
+    /// Replaces a file's extents (e.g. once its missing fragments were found), with the
+    /// size they add up to and a new status.
+    pub fn set_extents(
+        &mut self,
+        file_id: i64,
+        extents: &[Range<u64>],
+        status: Status,
+    ) -> Result<()> {
+        let tx = write(&mut self.conn)?;
+        let size: u64 = extents.iter().map(|e| e.end - e.start).sum();
+        let n = tx.execute(
+            "UPDATE files SET status = ?2, size = ?3 WHERE id = ?1",
+            params![file_id, status.code(), to_i64(size)?],
+        )?;
+        if n == 0 {
+            return Err(Error::NoSuchFile(file_id));
+        }
+        replace_extents(&tx, file_id, extents)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Number of (unmerged) files per category.
     pub fn counts(&self) -> Result<Counts> {
         let mut stmt = self.conn.prepare_cached(

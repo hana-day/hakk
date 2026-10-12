@@ -23,7 +23,12 @@ impl Device {
     /// Usually requires administrator privileges (except e.g. images attached with
     /// `hdiutil attach`).
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let file = sys::open(path.as_ref())?;
+        Self::from_file(sys::open(path.as_ref())?)
+    }
+
+    /// A device opened elsewhere (e.g. by macOS's `authopen`, which hands over the open
+    /// file). It must have been opened read-only.
+    pub fn from_file(file: File) -> io::Result<Self> {
         let (len, sector_size) = sys::geometry(&file)?;
         if !sector_size.is_power_of_two() {
             return Err(io::Error::new(

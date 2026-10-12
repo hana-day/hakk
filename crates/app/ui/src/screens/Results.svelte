@@ -160,7 +160,11 @@
     </div>
     <div class="actions">
       {#if session.scanning}
-        {#if paused}
+        {#if session.switching === 'pausing'}
+          <button type="button" class="btn-secondary" disabled>{t('header.pausing')}</button>
+        {:else if session.switching === 'resuming'}
+          <button type="button" class="btn-secondary" disabled>{t('header.resuming')}</button>
+        {:else if paused}
           <button type="button" class="btn-secondary" onclick={() => attempt(() => session.resume())}>
             <Icon name="play" size={14} />{t('header.resume')}
           </button>

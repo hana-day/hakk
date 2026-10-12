@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use carver::{
     Found,
     reader::Reader,
-    scan::{Options, carve_at, looks_like_header},
+    scan::{Options, carve_at_with, looks_like_header},
 };
 use index::{FileKind, NewFile, Preview, Status};
 
@@ -89,7 +89,9 @@ impl Analyzer for Carving {
             }
             let src = cx.source();
             let reader = parse.get_or_insert_with(|| Reader::new(src));
-            if let Some(found) = carve_at(reader, at, &self.opts) {
+            // Broken JPEGs are reported as they are; their missing fragments are looked
+            // for after the scan (the search would hold up this worker for seconds).
+            if let Some(found) = carve_at_with(reader, at, &self.opts, false) {
                 // A transport stream repeats table headers throughout; once followed, its
                 // fragments are not searched again even if it is broken.
                 for &(off, len) in found.claimed() {

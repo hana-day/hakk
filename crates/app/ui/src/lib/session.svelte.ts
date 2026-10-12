@@ -24,6 +24,9 @@ export class ScanSession {
   lastRepair = $state<RepairReport | null>(null);
   destinations = $state<Destination[]>([]);
   destination = $state<Destination | null>(null);
+  /** A pause or resume was asked for and the scan has not reported it yet (finishing the
+   *  block in hand and saving can take a moment). */
+  switching = $state<'pausing' | 'resuming' | null>(null);
   readonly selection = new SvelteSet<number>();
   readonly repairing = new SvelteSet<number>();
 
@@ -84,7 +87,14 @@ export class ScanSession {
   handle(event: HelperEvent): void {
     switch (event.type) {
       case 'scanProgress':
-        if (event.scanId === this.scanId) this.progress = event;
+        if (event.scanId !== this.scanId) return;
+        this.progress = event;
+        if (
+          (this.switching === 'pausing' && event.state !== 'running') ||
+          (this.switching === 'resuming' && event.state === 'running')
+        ) {
+          this.switching = null;
+        }
         return;
       case 'filesFound': {
         if (event.scanId !== this.scanId) return;
@@ -136,11 +146,23 @@ export class ScanSession {
   }
 
   async pause(): Promise<void> {
-    await api.pauseScan(this.scanId);
+    this.switching = 'pausing';
+    try {
+      await api.pauseScan(this.scanId);
+    } catch (err) {
+      this.switching = null;
+      throw err;
+    }
   }
 
   async resume(): Promise<void> {
-    await api.resumeScan(this.scanId);
+    this.switching = 'resuming';
+    try {
+      await api.resumeScan(this.scanId);
+    } catch (err) {
+      this.switching = null;
+      throw err;
+    }
   }
 
   async cancel(): Promise<void> {

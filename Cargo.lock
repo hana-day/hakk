@@ -1299,8 +1299,10 @@ name = "hakk-helper"
 version = "0.0.0"
 dependencies = [
  "blocksource",
+ "carver",
  "crossbeam-channel",
  "hakk-protocol",
+ "image",
  "index",
  "libc",
  "plist",

@@ -542,6 +542,11 @@ impl Reader {
             if !self.can_pull_forward(&range) {
                 break;
             }
+            // Pulling forward can take many blocks; a pause (or cancel) must not wait for
+            // them. Then only the range asked for is read.
+            if self.poll_control().is_err() || self.paused || self.leases > 0 {
+                break;
+            }
             // The data is just ahead: read the main pass up to it instead of seeking.
             self.scan_step();
         }
