@@ -19,6 +19,7 @@ mod recovery;
 mod rejoin;
 #[cfg(unix)]
 pub mod remote;
+mod thumbs;
 
 use std::{
     collections::HashMap,
@@ -31,12 +32,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::Engine;
 use blocksource::{Aligned, BlockSource, Device, ImageFile};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use hakk_protocol::{
-    Destination, Drive, DriveId, DriveKind, EventSink, FileKind, FileMerge, FileStatus, FileUpdate,
-    FilesFound, FilesMerged, FilesUpdated, FoundFile, Helper, HelperError, HelperEvent, RecoveryId,
-    RecoveryRequest, RepairRequest, SavedScan, ScanId, ScanSummary,
+    Destination, Drive, DriveId, DriveKind, EventSink, FileId, FileKind, FileMerge, FileStatus,
+    FileUpdate, FilesFound, FilesMerged, FilesUpdated, FoundFile, Helper, HelperError, HelperEvent,
+    RecoveryId, RecoveryRequest, RepairRequest, SavedScan, ScanId, ScanSummary, Thumbnail,
 };
 use index::{Index, Query};
 use scan::{Analyzer, Event, Outcome, Scan, ScanHandle};
@@ -114,6 +116,11 @@ pub fn default_data_dir() -> PathBuf {
         Some(home) => PathBuf::from(home).join(".local/share/hakk"),
         None => std::env::temp_dir().join("hakk"),
     }
+}
+
+/// Where the thumbnails of the scan saved at `index_path` are kept.
+fn thumbs_dir(index_path: &Path) -> PathBuf {
+    index_path.with_extension("thumbs")
 }
 
 /// FNV-1a (64-bit): a short, stable name for a drive's saved scan.
@@ -458,6 +465,8 @@ impl Helper for RealHelper {
             for suffix in ["", "-wal", "-shm"] {
                 let _ = std::fs::remove_file(format!("{}{suffix}", index_path.display()));
             }
+            // File ids start over, so the old thumbnails would show the wrong files.
+            let _ = std::fs::remove_dir_all(thumbs_dir(&index_path));
         }
         let index = Index::open(&index_path).map_err(internal)?;
         // Continue the saved scan if it was of this same source.
@@ -582,6 +591,45 @@ impl Helper for RealHelper {
     fn repair(&self, _request: RepairRequest) -> Result<(), HelperError> {
         // Video repair needs the `video` crate, which does not exist yet.
         Err(HelperError::NotAvailable)
+    }
+
+    fn thumbnail(&self, scan: ScanId, file: FileId, size: u32) -> Result<Thumbnail, HelperError> {
+        // While the scan runs, read through a foreground lease (it pauses the scan for the
+        // moment), as a recovery does.
+        let (source, index_path): (Box<dyn BlockSource>, PathBuf) = {
+            let state = self.shared.state();
+            let s = state.scan(scan)?;
+            let source: Box<dyn BlockSource> = if s.ended.load(Ordering::Acquire) {
+                Box::new(s.source.clone())
+            } else {
+                Box::new(s.handle.foreground())
+            };
+            (source, s.index_path.clone())
+        };
+        let index = Index::open(&index_path).map_err(internal)?;
+        let id = i64::try_from(file.0).map_err(|_| HelperError::FileNotFound)?;
+        let record = index
+            .file(id)
+            .map_err(internal)?
+            .ok_or(HelperError::FileNotFound)?;
+        let extents = index.extents(id).map_err(internal)?;
+        let picture = thumbs::thumbnail(
+            &record,
+            &extents,
+            source.as_ref(),
+            size.clamp(64, 2048),
+            &thumbs_dir(&index_path),
+        )
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::Unsupported => HelperError::NotAvailable,
+            _ => HelperError::CannotOpen {
+                detail: e.to_string(),
+            },
+        })?;
+        Ok(Thumbnail {
+            mime: picture.mime.to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(picture.bytes),
+        })
     }
 }
 

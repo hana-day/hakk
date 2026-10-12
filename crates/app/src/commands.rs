@@ -4,8 +4,8 @@
 //! blocks the window's event loop.
 
 use hakk_protocol::{
-    Destination, Drive, DriveId, Helper, HelperError, RecoveryId, RecoveryRequest, RepairRequest,
-    ScanId,
+    Destination, Drive, DriveId, FileId, Helper, HelperError, RecoveryId, RecoveryRequest,
+    RepairRequest, ScanId, Thumbnail,
 };
 use tauri::State;
 
@@ -65,4 +65,14 @@ pub fn recover(
 #[tauri::command(async)]
 pub fn repair(helper: State<'_, HelperState>, request: RepairRequest) -> Result<(), HelperError> {
     helper.0.repair(request)
+}
+
+#[tauri::command(async)]
+pub fn thumbnail(
+    helper: State<'_, HelperState>,
+    scan: ScanId,
+    file: FileId,
+    size: u32,
+) -> Result<Thumbnail, HelperError> {
+    helper.0.thumbnail(scan, file, size)
 }

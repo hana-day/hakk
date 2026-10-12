@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import type { FoundFile } from './bindings/FoundFile';
 import { t } from './i18n';
-import { applyFilters, folderTree, groupByDay, sortFiles, subfolders } from './results';
+import {
+  CARVED_KEY,
+  applyFilters,
+  buildTree,
+  filesUnder,
+  flattenTree,
+  noFilters,
+  parseQuery,
+  sortFiles,
+  typeCounts,
+  yearsOf,
+  type Filters,
+} from './results';
 
 let nextId = 0;
 
@@ -9,11 +21,16 @@ function fsOrigin(folders: string[], label: string | null = 'SD'): FoundFile['or
   return { type: 'fileSystem', volume: { index: 0, label }, folders, nameExact: true };
 }
 function file(over: Partial<FoundFile>): FoundFile {
+  nextId += 1;
   return {
-    id: nextId++,
+    id: nextId,
     kind: 'photo',
+    format: 'jpg',
     name: `IMG_${nextId}.JPG`,
     origin: fsOrigin(['DCIM', '100CANON']),
+    deleted: true,
+    width: null,
+    height: null,
     offset: 0,
     size: 1000,
     date: { local: '2025-08-14T10:00:00', source: 'capture' },
@@ -26,74 +43,115 @@ function file(over: Partial<FoundFile>): FoundFile {
   };
 }
 
-const base = { kind: 'all', recoverableOnly: false, showHidden: false } as const;
+const f = (over: Partial<Filters>): Filters => ({ ...noFilters, ...over });
 
-describe('results', () => {
-  it('hides junk unless asked, and filters by kind and status', () => {
+describe('search', () => {
+  it('reads extensions and words', () => {
+    expect(parseQuery('png')).toEqual({ formats: ['png'], words: [] });
+    expect(parseQuery('.CR2 *.jpeg')).toEqual({ formats: ['cr2', 'jpg'], words: [] });
+    expect(parseQuery(' holiday  2024 ')).toEqual({ formats: [], words: ['holiday', '2024'] });
+  });
+
+  it('finds files by extension, name and folder', () => {
+    const files = [
+      file({ name: 'beach.JPG' }),
+      file({ name: 'icon.png', format: 'png', origin: fsOrigin(['Windows', 'Icons']) }),
+      file({ name: 'IMG_0001.CR2', format: 'cr2' }),
+    ];
+    const names = (q: string) => applyFilters(files, f({ query: q })).map((x) => x.name);
+    expect(names('png')).toEqual(['icon.png']);
+    expect(names('.cr2')).toEqual(['IMG_0001.CR2']);
+    expect(names('*.jpg')).toEqual(['beach.JPG']);
+    expect(names('beach')).toEqual(['beach.JPG']);
+    expect(names('icons')).toEqual(['icon.png']);
+  });
+});
+
+describe('filters', () => {
+  it('hides junk unless asked, and filters by type, state and size', () => {
     const files = [
       file({}),
       file({ hidden: 'tooSmall' }),
-      file({ kind: 'video' }),
-      file({ status: 'partiallyDamaged' }),
+      file({ kind: 'video', format: 'mp4' }),
+      file({ status: 'partiallyDamaged', deleted: false }),
+      file({ size: 20_000_000 }),
     ];
-    expect(applyFilters(files, { ...base, scope: { type: 'all' } })).toHaveLength(3);
-    expect(applyFilters(files, { ...base, showHidden: true, scope: { type: 'all' } })).toHaveLength(4);
-    expect(applyFilters(files, { ...base, kind: 'video', scope: { type: 'all' } })).toHaveLength(1);
-    expect(
-      applyFilters(files, { ...base, recoverableOnly: true, scope: { type: 'all' } }),
-    ).toHaveLength(2);
+    expect(applyFilters(files, noFilters)).toHaveLength(4);
+    expect(applyFilters(files, f({ showHidden: true }))).toHaveLength(5);
+    expect(applyFilters(files, f({ type: { kind: 'video', format: null } }))).toHaveLength(1);
+    expect(applyFilters(files, f({ type: { kind: 'photo', format: 'mp4' } }))).toHaveLength(0);
+    expect(applyFilters(files, f({ recoverableOnly: true }))).toHaveLength(3);
+    expect(applyFilters(files, f({ deleted: 'existing' }))).toHaveLength(1);
+    expect(applyFilters(files, f({ deleted: 'deleted' }))).toHaveLength(3);
+    expect(applyFilters(files, f({ size: 'large' }))).toHaveLength(1);
   });
 
-  it('scopes to a folder, deep or direct', () => {
-    const files = [
-      file({ origin: fsOrigin(['DCIM']) }),
+  it('filters by year and lists the years', () => {
+    const files = [file({}), file({ date: { local: '2023-01-02T00:00:00', source: 'capture' } }), file({ date: null })];
+    expect(yearsOf(files)).toEqual(['2025', '2023']);
+    expect(applyFilters(files, f({ year: '2023' }))).toHaveLength(1);
+  });
+
+  it('counts types and formats for the sidebar', () => {
+    const counts = typeCounts([
       file({}),
-      file({ origin: { type: 'carved', namedFromMetadata: false } }),
-    ];
-    const scope = { type: 'folder', path: ['SD', 'DCIM'] } as const;
-    expect(applyFilters(files, { ...base, scope })).toHaveLength(2);
-    expect(applyFilters(files, { ...base, scope }, false)).toHaveLength(1);
-    expect(applyFilters(files, { ...base, scope: { type: 'carved', kind: 'photo' } })).toHaveLength(1);
-  });
-
-  it('sorts undated files last and groups by day and origin', () => {
-    const a = file({ date: { local: '2025-08-03T09:00:00', source: 'capture' } });
-    const b = file({ date: null, origin: { type: 'carved', namedFromMetadata: false } });
-    const c = file({ date: { local: '2025-08-14T09:00:00', source: 'capture' } });
-    const d = file({
-      date: { local: '2025-08-14T08:00:00', source: 'capture' },
-      origin: { type: 'carved', namedFromMetadata: true },
-    });
-    const sorted = sortFiles([a, b, c, d], 'newest');
-    expect(sorted.map((f) => f.id)).toEqual([c.id, d.id, a.id, b.id]);
-    const groups = groupByDay(sorted);
-    expect(groups.map((g) => [g.day, g.files.length])).toEqual([
-      ['2025-08-14', 1],
-      ['2025-08-14', 1],
-      ['2025-08-03', 1],
-      [null, 1],
+      file({}),
+      file({ format: 'png' }),
+      file({ kind: 'video', format: 'mts' }),
     ]);
-  });
-
-  it('builds a folder tree with descendant counts', () => {
-    const files = [
-      file({}),
-      file({}),
-      file({ origin: fsOrigin(['DCIM', '101CANON']) }),
-      file({ origin: fsOrigin(['MISC']) }),
-    ];
-    expect(folderTree(files).map((r) => [r.name, r.depth, r.count])).toEqual([
-      ['SD', 0, 4],
-      ['DCIM', 1, 3],
-      ['100CANON', 2, 2],
-      ['101CANON', 2, 1],
-      ['MISC', 1, 1],
+    expect(counts.all).toBe(4);
+    expect(counts.photo).toBe(3);
+    expect(counts.formats.photo).toEqual([
+      { format: 'jpg', count: 2 },
+      { format: 'png', count: 1 },
     ]);
-    expect(subfolders(files, ['SD']).map((r) => r.name)).toEqual(['DCIM', 'MISC']);
+    expect(counts.formats.video).toEqual([{ format: 'mts', count: 1 }]);
+  });
+});
+
+describe('sorting', () => {
+  it('puts undated files last', () => {
+    const a = file({ date: { local: '2025-08-14T10:00:00', source: 'capture' } });
+    const b = file({ date: null });
+    const c = file({ date: { local: '2025-08-15T10:00:00', source: 'capture' } });
+    expect(sortFiles([a, b, c], 'newest').map((x) => x.id)).toEqual([c.id, a.id, b.id]);
+    expect(sortFiles([a, b, c], 'oldest').map((x) => x.id)).toEqual([a.id, c.id, b.id]);
+  });
+});
+
+describe('tree', () => {
+  it('nests folders with counts and sizes, and the carved files last', () => {
+    const files = [
+      file({ origin: fsOrigin(['DCIM', '100CANON']), size: 10 }),
+      file({ origin: fsOrigin(['DCIM', '101CANON']), size: 20 }),
+      file({ origin: fsOrigin([]), size: 5 }),
+      file({ origin: { type: 'carved', namedFromMetadata: false }, size: 7 }),
+    ];
+    const roots = buildTree(files, 'name');
+    expect(roots.map((r) => r.name)).toEqual(['SD', t('results.carvedFolder')]);
+    const sd = roots[0]!;
+    expect([sd.count, sd.size]).toEqual([3, 35]);
+    expect(sd.files).toHaveLength(1);
+    expect(sd.folders.map((x) => x.name)).toEqual(['DCIM']);
+    expect(sd.folders[0]!.folders.map((x) => [x.name, x.count])).toEqual([
+      ['100CANON', 1],
+      ['101CANON', 1],
+    ]);
+    expect(roots[1]!.key).toBe(CARVED_KEY);
+    expect(filesUnder(sd)).toHaveLength(3);
   });
 
-  it('names unlabeled volumes by position', () => {
-    const f = file({ origin: fsOrigin(['DCIM'], null) });
-    expect(folderTree([f])[0]?.name).toBe(t('results.volume', { n: 1 }));
+  it('shows only the open folders', () => {
+    const files = [file({ origin: fsOrigin(['DCIM']) }), file({ origin: fsOrigin(['DCIM']) })];
+    const roots = buildTree(files, 'name');
+    const closed = flattenTree(roots, new Set());
+    expect(closed.map((r) => r.type)).toEqual(['folder']);
+    const open = flattenTree(roots, new Set(['/SD', '/SD/DCIM']));
+    expect(open.map((r) => [r.type, r.depth])).toEqual([
+      ['folder', 0],
+      ['folder', 1],
+      ['file', 2],
+      ['file', 2],
+    ]);
   });
 });

@@ -178,6 +178,7 @@ fn main() {
             commands::cancel_scan,
             commands::recover,
             commands::repair,
+            commands::thumbnail,
         ])
         .run(tauri::generate_context!());
     if let Err(err) = result {

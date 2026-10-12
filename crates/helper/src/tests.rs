@@ -423,3 +423,50 @@ fn a_fragmented_jpeg_is_rejoined_after_the_scan() {
         "{u:?}"
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn makes_a_thumbnail_of_a_found_photo() {
+    use base64::Engine;
+    let dir = tempfile::tempdir().unwrap();
+    let jpeg = photo(640, 480);
+    let mut image = vec![0u8; 64 << 10];
+    image.extend(&jpeg);
+    image.resize(1 << 20, 0);
+    let path = dir.path().join("card.img");
+    std::fs::write(&path, &image).unwrap();
+
+    let (tx, events) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    let helper = RealHelper::with_options(
+        Box::new(move |e| {
+            let _ = tx.lock().unwrap().send(e);
+        }),
+        Arc::new(scan::analyzers::default_set),
+        dir.path().join("work"),
+        Box::new(|_| Vec::new()),
+    );
+    let drive = helper.open_image(&path.to_string_lossy()).unwrap();
+    let scan_id = helper.start_scan(&drive.id, true).unwrap();
+    let seen = until(&events, |e| matches!(e, HelperEvent::ScanFinished(_)));
+    let file = seen
+        .iter()
+        .flat_map(|e| match e {
+            HelperEvent::FilesFound(f) => f.files.clone(),
+            _ => Vec::new(),
+        })
+        .find(|f| f.offset == Some(64 << 10))
+        .expect("the JPEG was found");
+    assert_eq!(file.format, "jpg");
+    assert!(file.deleted, "carved files count as deleted");
+
+    let thumb = helper.thumbnail(scan_id, file.id, 128).unwrap();
+    assert_eq!(thumb.mime, "image/jpeg");
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&thumb.data)
+        .unwrap();
+    assert!(bytes.starts_with(&[0xFF, 0xD8]));
+    let decoded = image::load_from_memory(&bytes).unwrap();
+    assert!(decoded.width() <= 128 && decoded.height() <= 128);
+    assert!(decoded.width() == 128 || decoded.height() == 128);
+}

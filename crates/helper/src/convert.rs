@@ -129,8 +129,12 @@ pub(crate) fn found_file(r: &FileRecord, folders: Vec<String>) -> FoundFile {
     FoundFile {
         id: FileId(u64::try_from(r.id).unwrap_or(0)),
         kind,
+        format: r.kind.code().to_owned(),
         name,
         origin,
+        deleted: r.deleted || r.origin == Origin::Carving,
+        width: r.preview.width,
+        height: r.preview.height,
         offset: r.offset,
         size: r.size,
         date,

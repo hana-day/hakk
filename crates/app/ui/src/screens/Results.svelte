@@ -1,16 +1,19 @@
 <script lang="ts">
+  import { SvelteSet } from 'svelte/reactivity';
   import type { Destination } from '../lib/bindings/Destination';
-  import type { RepairMethod } from '../lib/bindings/RepairMethod';
   import { driveTitle, errorText } from '../lib/display';
   import { t } from '../lib/i18n';
   import {
     applyFilters,
-    countCarved,
-    passesFilters,
+    buildTree,
+    formatLabel,
+    inType,
+    noFilters,
+    passesOthers,
     sortFiles,
-    subfolders,
-    type KindFilter,
-    type Scope,
+    typeCounts,
+    yearsOf,
+    type Filters,
     type SortOrder,
     type ViewMode,
   } from '../lib/results';
@@ -20,10 +23,8 @@
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
   import Msg from '../components/Msg.svelte';
-  import Sentinel from '../components/Sentinel.svelte';
   import DestinationDialog from '../components/results/DestinationDialog.svelte';
-  import FolderView from '../components/results/FolderView.svelte';
-  import ListView from '../components/results/ListView.svelte';
+  import PreviewPane from '../components/results/PreviewPane.svelte';
   import ProgressPanel from '../components/results/ProgressPanel.svelte';
   import RecoveryBanner from '../components/results/RecoveryBanner.svelte';
   import RecoveryDoneDialog from '../components/results/RecoveryDoneDialog.svelte';
@@ -32,67 +33,51 @@
   import SummaryPanel from '../components/results/SummaryPanel.svelte';
   import ThumbnailView from '../components/results/ThumbnailView.svelte';
   import Toolbar from '../components/results/Toolbar.svelte';
+  import TreeTable from '../components/results/TreeTable.svelte';
 
   let { session, onleave }: { session: ScanSession; onleave: () => Promise<void> } = $props();
 
-  /** Items rendered per page; more are added as the user scrolls. */
-  const PAGE = 240;
-
-  let scope = $state<Scope>({ type: 'all' });
-  let mode = $state<ViewMode>('thumbnails');
-  let kind = $state<KindFilter>('all');
-  let recoverableOnly = $state(false);
+  let filters = $state<Filters>({ ...noFilters });
+  let mode = $state<ViewMode>('list');
   let sort = $state<SortOrder>('newest');
-  let showHidden = $state(false);
-  let limit = $state(PAGE);
+  /** Open folders of the list. */
+  const open = new SvelteSet<string>();
+  let previewId = $state<number | null>(null);
 
   let choosingDestination = $state(false);
+  /** Files to recover once a destination is chosen (a single file from the preview). */
+  let pendingRecovery = $state<number[] | null>(null);
   let confirming = $state<'cancel' | 'leave' | null>(null);
 
-  // Start from the top whenever what is listed changes.
-  $effect(() => {
-    void [scope, mode, kind, recoverableOnly, sort, showHidden];
-    limit = PAGE;
-  });
-
-  const filters = $derived({ scope, kind, recoverableOnly, showHidden });
-  const others = $derived({ kind, recoverableOnly, showHidden });
-  /** Every found file the current filters would show, for sidebar counts. */
-  const countable = $derived(session.allFiles.filter((f) => passesFilters(f, others)));
-  const shown = $derived(session.shownFiles.filter((f) => passesFilters(f, others)));
-  const matching = $derived(sortFiles(applyFilters(shown, filters, mode !== 'folder'), sort));
-  const visible = $derived(matching.slice(0, limit));
+  /** Files passing every filter but the type, for the sidebar's counts. */
+  const others = $derived(session.allFiles.filter((f) => passesOthers(f, filters)));
+  const counts = $derived(typeCounts(others));
+  const years = $derived(yearsOf(session.allFiles));
+  const matching = $derived(applyFilters(session.shownFiles, filters));
+  const sorted = $derived(sortFiles(matching, sort));
+  const tree = $derived(buildTree(matching, sort));
   const pendingCount = $derived(
-    session.pendingFiles.filter((f) => passesFilters(f, { kind: 'all', recoverableOnly: false, showHidden }))
-      .length,
+    session.pendingFiles.filter((f) => inType(f, filters.type) && passesOthers(f, filters)).length,
   );
   const hiddenCount = $derived(session.allFiles.filter((f) => f.hidden !== null).length);
+  const previewed = $derived(previewId === null ? null : (session.file(previewId) ?? null));
 
-  const folderRows = $derived(
-    mode !== 'folder' || scope.type === 'carved'
-      ? []
-      : subfolders(shown, scope.type === 'folder' ? scope.path : []),
-  );
-  const carvedFolders = $derived(
-    mode === 'folder' && scope.type === 'all'
-      ? (['photo', 'video'] as const)
-          .map((k) => ({ kind: k, count: countCarved(shown, k) }))
-          .filter((c) => c.count > 0)
-      : [],
-  );
-  // At the top of the folder view, files sit inside the folders above.
-  const listed = $derived(mode === 'folder' && scope.type === 'all' ? [] : visible);
-
-  const breadcrumb = $derived.by(() => {
-    const sep = t('results.breadcrumbSeparator');
-    switch (scope.type) {
-      case 'all':
-        return t('sidebar.all');
-      case 'folder':
-        return scope.path.join(sep);
-      case 'carved':
-        return t('results.carved') + sep + (scope.kind === 'photo' ? t('sidebar.photos') : t('sidebar.videos'));
+  // Open the top folders (volumes, the carved files) when they first appear.
+  $effect(() => {
+    for (const root of tree) {
+      if (!seenRoots.has(root.key)) {
+        seenRoots.add(root.key);
+        open.add(root.key);
+      }
     }
+  });
+  const seenRoots = new Set<string>();
+
+  const place = $derived.by(() => {
+    const k = filters.type;
+    if (k.kind === 'all') return t('sidebar.all');
+    const kind = k.kind === 'photo' ? t('sidebar.photos') : t('sidebar.videos');
+    return k.format === null ? kind : `${kind}${t('results.breadcrumbSeparator')}${formatLabel(k.format)}`;
   });
 
   const paused = $derived(session.progress?.state === 'paused');
@@ -109,24 +94,28 @@
     if (!session.selection.delete(id)) session.selection.add(id);
   }
 
-  function selectAll(select: boolean) {
-    for (const f of matching) {
-      if (select) session.selection.add(f.id);
-      else session.selection.delete(f.id);
+  function selectMany(ids: number[], select: boolean) {
+    for (const id of ids) {
+      if (select) session.selection.add(id);
+      else session.selection.delete(id);
     }
   }
 
-  function repair(id: number, method: RepairMethod) {
+  function recoverOne(id: number) {
     if (session.destination === null) {
+      pendingRecovery = [id];
       choosingDestination = true;
       return;
     }
-    void attempt(() => session.repair(id, method));
+    void attempt(() => session.recoverFiles([id]));
   }
 
   function chooseDestination(d: Destination) {
     session.destination = d;
     choosingDestination = false;
+    const files = pendingRecovery;
+    pendingRecovery = null;
+    if (files !== null) void attempt(() => session.recoverFiles(files));
   }
 
   // Report finished repairs.
@@ -199,13 +188,13 @@
   {/if}
 
   <div class="body">
-    <Sidebar files={countable} {scope} onselect={(s) => (scope = s)} />
+    <Sidebar {counts} type={filters.type} onselect={(type) => (filters.type = type)} />
 
     <main>
-      <Toolbar bind:mode bind:kind bind:recoverableOnly bind:sort />
+      <Toolbar bind:filters bind:mode bind:sort {years} />
 
       <div class="context">
-        <span><Msg key="results.context" params={{ place: breadcrumb, count: matching.length }} mono={['count']} /></span>
+        <span><Msg key="results.context" params={{ place, count: matching.length }} mono={['count']} /></span>
       </div>
 
       {#if pendingCount > 0}
@@ -215,51 +204,49 @@
         </button>
       {/if}
 
-      {#if matching.length === 0 && folderRows.length === 0 && carvedFolders.length === 0}
+      {#if matching.length === 0}
         <p class="empty">
           {session.scanning && session.allFiles.length === 0 ? t('results.emptyScanning') : t('results.empty')}
         </p>
-      {:else if mode === 'folder'}
-        <FolderView
-          folders={folderRows}
-          carved={carvedFolders}
-          files={listed}
+      {:else if mode === 'list'}
+        <TreeTable
+          scanId={session.scanId}
+          roots={tree}
+          {open}
           selection={session.selection}
+          {previewId}
           ontoggle={toggle}
-          onopen={(s) => (scope = s)}
-        />
-      {:else if mode === 'thumbnails'}
-        <ThumbnailView
-          files={visible}
-          grouped={sort === 'newest' || sort === 'oldest'}
-          selection={session.selection}
-          ontoggle={toggle}
+          onselectmany={selectMany}
+          onpreview={(id) => (previewId = id)}
         />
       {:else}
-        <ListView
-          files={visible}
-          allIds={matching.map((f) => f.id)}
+        <ThumbnailView
+          scanId={session.scanId}
+          files={sorted}
           selection={session.selection}
-          repairing={session.repairing}
+          {previewId}
           ontoggle={toggle}
-          onselectall={selectAll}
-          onrepair={repair}
+          onpreview={(id) => (previewId = id)}
         />
-      {/if}
-
-      {#if visible.length < matching.length}
-        <Sentinel onvisible={() => (limit += PAGE)} />
       {/if}
 
       {#if hiddenCount > 0}
         <p class="hidden-note">
-          {showHidden ? t('results.hiddenShown') : t('results.hiddenNote', { count: hiddenCount })}
-          <button type="button" class="btn-link" onclick={() => (showHidden = !showHidden)}>
-            {showHidden ? t('results.hideHidden') : t('results.showHidden')}
+          {filters.showHidden ? t('results.hiddenShown') : t('results.hiddenNote', { count: hiddenCount })}
+          <button type="button" class="btn-link" onclick={() => (filters.showHidden = !filters.showHidden)}>
+            {filters.showHidden ? t('results.hideHidden') : t('results.showHidden')}
           </button>
         </p>
       {/if}
     </main>
+
+    <PreviewPane
+      scanId={session.scanId}
+      file={previewed}
+      selected={previewId !== null && session.selection.has(previewId)}
+      ontoggle={toggle}
+      onrecover={recoverOne}
+    />
   </div>
 
   <SelectionBar
@@ -277,7 +264,10 @@
   destinations={session.destinations}
   current={session.destination}
   onchoose={chooseDestination}
-  onclose={() => (choosingDestination = false)}
+  onclose={() => {
+    choosingDestination = false;
+    pendingRecovery = null;
+  }}
 />
 
 <RecoveryDoneDialog report={session.recoveryReport} onclose={() => (session.recoveryReport = null)} />

@@ -170,8 +170,13 @@ export class ScanSession {
   }
 
   async recover(): Promise<void> {
+    await this.recoverFiles([...this.selection]);
+  }
+
+  /** Recovers these files (not the selection) to the chosen destination. */
+  async recoverFiles(ids: number[]): Promise<void> {
     if (this.destination === null) return;
-    const files = [...this.selection].filter((id) => this.files.has(id));
+    const files = ids.filter((id) => this.files.has(id));
     await api.recover({ scanId: this.scanId, files, destination: this.destination.id });
   }
 

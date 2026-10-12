@@ -15,6 +15,7 @@
     video: '<rect x="3" y="6" width="13" height="12" rx="2"/><path d="M16 10l5-3v10l-5-3"/>',
     check: '<path d="M5 12.5l4.5 4.5L19 7"/>',
     up: '<path d="M12 19V5M5 12l7-7 7 7"/>',
+    chevron: '<path d="M9 6l6 6-6 6"/>',
     download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
     repair:
       '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17l3 3 5.3-5.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.5-2.5z"/>',

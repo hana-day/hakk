@@ -316,8 +316,17 @@ pub enum RepairMethod {
 pub struct FoundFile {
     pub id: FileId,
     pub kind: FileKind,
+    /// The file format as its usual extension, lowercase (`jpg`, `png`, `heic`, `cr2`,
+    /// `mp4`, `mts`, ...).
+    pub format: String,
     pub name: String,
     pub origin: FileOrigin,
+    /// Deleted (or found in the raw data, which only holds what is no longer a file);
+    /// `false` for files the file system still has.
+    pub deleted: bool,
+    /// Picture size in pixels, when known.
+    pub width: Option<u32>,
+    pub height: Option<u32>,
     /// Where the data starts on the drive. `None` when the location is unknown, e.g. a
     /// deleted entry whose cluster chain is gone.
     #[ts(type = "number | null")]
@@ -333,6 +342,16 @@ pub struct FoundFile {
     pub hidden: Option<HiddenReason>,
     /// Repair offered for this file, if any.
     pub repair: Option<RepairMethod>,
+}
+
+/// A small picture of a found file, made from its data on the drive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Thumbnail {
+    /// Media type of `data`, e.g. `image/jpeg`.
+    pub mime: String,
+    /// The image, base64-encoded.
+    pub data: String,
 }
 
 /// New verification result for a file that was reported earlier.
@@ -525,6 +544,10 @@ pub trait Helper: Send + Sync {
 
     /// Writes a repaired copy of a video to a destination.
     fn repair(&self, request: RepairRequest) -> Result<(), HelperError>;
+
+    /// A picture of a found file at most `size` pixels on its longer side (a frame for a
+    /// video). Reading pauses a running scan briefly.
+    fn thumbnail(&self, scan: ScanId, file: FileId, size: u32) -> Result<Thumbnail, HelperError>;
 }
 
 /// Messages between the GUI and a helper running as a separate process (one JSON object
@@ -534,8 +557,8 @@ pub mod wire {
     use serde::{Deserialize, Serialize};
 
     use super::{
-        Destination, Drive, DriveId, HelperError, HelperEvent, RecoveryId, RecoveryRequest,
-        RepairRequest, ScanId,
+        Destination, Drive, DriveId, FileId, HelperError, HelperEvent, RecoveryId, RecoveryRequest,
+        RepairRequest, ScanId, Thumbnail,
     };
 
     /// A call on [`super::Helper`].
@@ -543,14 +566,36 @@ pub mod wire {
     #[serde(tag = "call", rename_all = "camelCase")]
     pub enum Call {
         ListDrives,
-        OpenImage { path: String },
-        ListDestinations { source: DriveId },
-        StartScan { drive: DriveId, fresh: bool },
-        PauseScan { scan: ScanId },
-        ResumeScan { scan: ScanId },
-        CancelScan { scan: ScanId },
-        Recover { request: RecoveryRequest },
-        Repair { request: RepairRequest },
+        OpenImage {
+            path: String,
+        },
+        ListDestinations {
+            source: DriveId,
+        },
+        StartScan {
+            drive: DriveId,
+            fresh: bool,
+        },
+        PauseScan {
+            scan: ScanId,
+        },
+        ResumeScan {
+            scan: ScanId,
+        },
+        CancelScan {
+            scan: ScanId,
+        },
+        Recover {
+            request: RecoveryRequest,
+        },
+        Repair {
+            request: RepairRequest,
+        },
+        Thumbnail {
+            scan: ScanId,
+            file: FileId,
+            size: u32,
+        },
     }
 
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -569,6 +614,7 @@ pub mod wire {
         Destinations(Vec<Destination>),
         Scan(ScanId),
         Recovery(RecoveryId),
+        Thumbnail(Thumbnail),
         Done,
     }
 
@@ -594,6 +640,7 @@ pub fn export_typescript(dir: &std::path::Path) -> Result<(), ts_rs::ExportError
     HelperError::export_all(&cfg)?;
     RecoveryRequest::export_all(&cfg)?;
     RepairRequest::export_all(&cfg)?;
+    Thumbnail::export_all(&cfg)?;
     Ok(())
 }
 

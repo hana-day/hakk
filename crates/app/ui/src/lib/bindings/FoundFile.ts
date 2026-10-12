@@ -11,7 +11,21 @@ import type { RepairMethod } from "./RepairMethod";
 /**
  * A file found by a scan. The data itself stays on the disk until it is recovered.
  */
-export type FoundFile = { id: FileId, kind: FileKind, name: string, origin: FileOrigin, 
+export type FoundFile = { id: FileId, kind: FileKind, 
+/**
+ * The file format as its usual extension, lowercase (`jpg`, `png`, `heic`, `cr2`,
+ * `mp4`, `mts`, ...).
+ */
+format: string, name: string, origin: FileOrigin, 
+/**
+ * Deleted (or found in the raw data, which only holds what is no longer a file);
+ * `false` for files the file system still has.
+ */
+deleted: boolean, 
+/**
+ * Picture size in pixels, when known.
+ */
+width: number | null, height: number | null, 
 /**
  * Where the data starts on the drive. `None` when the location is unknown, e.g. a
  * deleted entry whose cluster chain is gone.

@@ -124,6 +124,16 @@ impl Helper for MockHelper {
     fn repair(&self, request: RepairRequest) -> Result<(), HelperError> {
         self.with(|s| s.repair(request))
     }
+
+    fn thumbnail(
+        &self,
+        _scan: ScanId,
+        _file: hakk_protocol::FileId,
+        _size: u32,
+    ) -> Result<hakk_protocol::Thumbnail, HelperError> {
+        // The simulated files have no data to draw.
+        Err(HelperError::NotAvailable)
+    }
 }
 
 struct Sim {
@@ -678,11 +688,29 @@ impl Scan {
         let plan = self.plan.get(index)?;
         self.next += 1;
         let id = FileId(index as u64);
+        let carved = matches!(plan.origin, hakk_protocol::FileOrigin::Carved { .. });
+        let format = plan
+            .name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_else(|| {
+                if plan.kind == FileKind::Video {
+                    "mp4"
+                } else {
+                    "jpg"
+                }
+                .to_owned()
+            });
         let file = FoundFile {
             id,
             kind: plan.kind,
+            format,
             name: plan.name.clone(),
             origin: plan.origin.clone(),
+            // Some of the named files are still on the card in this simulation.
+            deleted: carved || !index.is_multiple_of(4),
+            width: None,
+            height: None,
             offset: Some(plan.offset),
             size: plan.size,
             date: plan.date.clone(),

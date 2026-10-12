@@ -4,6 +4,7 @@
   import type { Drive } from './lib/bindings/Drive';
   import type { HelperEvent } from './lib/bindings/HelperEvent';
   import { ScanSession } from './lib/session.svelte';
+  import { clearThumbnails } from './lib/thumbs.svelte';
   import Toasts from './components/Toasts.svelte';
   import DriveSelect from './screens/DriveSelect.svelte';
   import Results from './screens/Results.svelte';
@@ -21,6 +22,8 @@
   });
 
   async function start(drive: Drive, fresh: boolean) {
+    // File ids start over with each scan, so earlier thumbnails would be wrong.
+    clearThumbnails();
     early = [];
     try {
       const scanId = await api.startScan(drive.id, fresh);

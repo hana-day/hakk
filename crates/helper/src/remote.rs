@@ -30,8 +30,8 @@ use std::{
 
 use crossbeam_channel::{Sender, bounded};
 use hakk_protocol::{
-    Destination, Drive, DriveId, EventSink, Helper, HelperError, RecoveryId, RecoveryRequest,
-    RepairRequest, ScanId,
+    Destination, Drive, DriveId, EventSink, FileId, Helper, HelperError, RecoveryId,
+    RecoveryRequest, RepairRequest, ScanId, Thumbnail,
     wire::{Answer, Call, HelperMessage, Request},
 };
 
@@ -102,6 +102,7 @@ fn dispatch(h: &RealHelper, call: Call) -> Result<Answer, HelperError> {
         Call::CancelScan { scan } => h.cancel_scan(scan).map(|()| Answer::Done)?,
         Call::Recover { request } => Answer::Recovery(h.recover(request)?),
         Call::Repair { request } => h.repair(request).map(|()| Answer::Done)?,
+        Call::Thumbnail { scan, file, size } => Answer::Thumbnail(h.thumbnail(scan, file, size)?),
     })
 }
 
@@ -315,6 +316,13 @@ impl Helper for RemoteHelper {
 
     fn repair(&self, request: RepairRequest) -> Result<(), HelperError> {
         self.call(Call::Repair { request }).map(|_| ())
+    }
+
+    fn thumbnail(&self, scan: ScanId, file: FileId, size: u32) -> Result<Thumbnail, HelperError> {
+        match self.call(Call::Thumbnail { scan, file, size })? {
+            Answer::Thumbnail(t) => Ok(t),
+            other => Err(wrong(other)),
+        }
     }
 }
 

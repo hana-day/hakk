@@ -10,6 +10,7 @@ import type { RecoveryId } from './bindings/RecoveryId';
 import type { RecoveryRequest } from './bindings/RecoveryRequest';
 import type { RepairRequest } from './bindings/RepairRequest';
 import type { ScanId } from './bindings/ScanId';
+import type { Thumbnail } from './bindings/Thumbnail';
 
 /** Must match `HELPER_EVENT` in src/main.rs. */
 export const HELPER_EVENT = 'helper-event';
@@ -25,6 +26,9 @@ export const api = {
   cancelScan: (scan: ScanId) => invoke<null>('cancel_scan', { scan }),
   recover: (request: RecoveryRequest) => invoke<RecoveryId>('recover', { request }),
   repair: (request: RepairRequest) => invoke<null>('repair', { request }),
+  /** A picture of a found file, at most `size` pixels on its longer side. */
+  thumbnail: (scan: ScanId, file: number, size: number) =>
+    invoke<Thumbnail>('thumbnail', { scan, file, size }),
 };
 
 export function onHelperEvent(handler: (event: HelperEvent) => void): Promise<UnlistenFn> {
