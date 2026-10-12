@@ -19,6 +19,7 @@ use crate::{
     disk::Disk,
     exfat, fat,
     le::{u8_at, u32_at, u64_at},
+    ntfs,
 };
 
 /// A region of the disk that may hold a volume.
@@ -60,7 +61,10 @@ pub fn find_partitions(src: &dyn BlockSource) -> Result<Vec<Partition>, Error> {
         return Ok(whole);
     };
     // A volume boot record also ends in AA55h, so check for one first.
-    if exfat::is_boot_sector(&sector0) || fat::is_boot_sector(&sector0) {
+    if exfat::is_boot_sector(&sector0)
+        || ntfs::is_boot_sector(&sector0)
+        || fat::is_boot_sector(&sector0)
+    {
         return Ok(whole);
     }
     if sector0.get(510..512) != Some([0x55, 0xAA].as_slice()) {

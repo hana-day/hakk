@@ -444,6 +444,9 @@ pub(crate) fn scan(disk: &Disk, boot: &Boot) -> Volume {
                 valid_size: s.valid_len,
                 first_cluster: s.first_cluster,
                 extents: p.extents,
+                holes: Vec::new(),
+                resident: None,
+                record: None,
                 layout: if size == 0 && s.no_fat_chain {
                     Layout::Contiguous
                 } else {

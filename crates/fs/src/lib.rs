@@ -3,7 +3,7 @@
 //! Finds the volumes on a disk ([`find_partitions`]) and lists their files, including
 //! deleted ones, with where their data lies ([`scan_volume`], [`scan_disk`]).
 //!
-//! Supported: exFAT and FAT12/16/32.
+//! Supported: exFAT, FAT12/16/32 and NTFS.
 //!
 //! Every read goes through [`BlockSource`], so this crate cannot write to the disk. The
 //! parsers never panic or loop forever on malformed input: every structure read from disk
@@ -14,6 +14,8 @@
 //!
 //! FAT and exFAT drop a deleted file's allocation (FAT12/16/32 clear its FAT chain; exFAT
 //! clears its bits in the allocation bitmap), so where its data lies has to be inferred.
+//! NTFS keeps a deleted file's MFT record, data runs included, until the record is reused,
+//! so even a fragmented file's placement is known exactly.
 //! [`Entry::layout`] says how the extents were obtained and [`Entry::confidence`] how far
 //! they can be trusted.
 
@@ -22,6 +24,7 @@ mod exfat;
 mod fat;
 mod heap;
 mod le;
+mod ntfs;
 mod partition;
 mod time;
 
@@ -51,6 +54,7 @@ pub enum FsKind {
     Fat12,
     Fat16,
     Fat32,
+    Ntfs,
 }
 
 impl fmt::Display for FsKind {
@@ -60,6 +64,7 @@ impl fmt::Display for FsKind {
             FsKind::Fat12 => "FAT12",
             FsKind::Fat16 => "FAT16",
             FsKind::Fat32 => "FAT32",
+            FsKind::Ntfs => "NTFS",
         })
     }
 }
@@ -77,6 +82,10 @@ pub enum Layout {
     StaleChain,
     /// The chain is gone; the data is assumed to be contiguous from the first cluster.
     Assumed,
+    /// The data runs recorded in the file's NTFS MFT record (kept after deletion).
+    Runs,
+    /// The data is stored inside the NTFS MFT record itself ([`Entry::resident`]).
+    Resident,
 }
 
 /// How far an entry's extents can be trusted.
@@ -88,8 +97,9 @@ pub enum Confidence {
     /// The placement is inferred (assumed contiguous, or a stale chain) and none of its
     /// clusters is currently allocated.
     Medium,
-    /// Known placement: a live entry, a contiguous (`NoFatChain`) entry or a deleted entry
-    /// fitting in one cluster, with no cluster reallocated since.
+    /// Known placement: a live entry, a contiguous (`NoFatChain`) entry, a deleted entry
+    /// fitting in one cluster, or the data runs of an NTFS record, with no cluster
+    /// reallocated since.
     High,
 }
 
@@ -110,15 +120,34 @@ pub struct Entry {
     /// Bytes holding written data; the rest up to `size` reads as zeros (exFAT
     /// `ValidDataLength`). Equal to `size` on FAT.
     pub valid_size: u64,
+    /// First cluster of the data (NTFS: the first allocated cluster, saturated to `u32`;
+    /// 0 if there is none).
     pub first_cluster: u32,
-    /// Where the data lies, in file order. Covers `size` bytes unless the placement could
-    /// not be determined completely (then `confidence` is [`Confidence::Low`]).
+    /// Where the data lies, in file order. Covers `size` bytes, minus any `holes`, unless
+    /// the placement could not be determined completely (then `confidence` is
+    /// [`Confidence::Low`]).
     pub extents: Vec<Extent>,
+    /// Ranges of the file that are not stored and read as zeros (NTFS sparse runs), in
+    /// file order. To rebuild the file, insert each hole when the data read so far reaches
+    /// its `file_offset`. Empty for FAT and exFAT.
+    pub holes: Vec<Hole>,
+    /// The data itself when it is stored inside the file system metadata (NTFS resident
+    /// `$DATA`) rather than in clusters; `extents` is then empty.
+    pub resident: Option<Vec<u8>>,
+    /// The NTFS MFT record number (unique within the volume); `None` for FAT and exFAT.
+    pub record: Option<u64>,
     pub layout: Layout,
     pub confidence: Confidence,
     pub created: Option<Timestamp>,
     pub modified: Option<Timestamp>,
     pub accessed: Option<Timestamp>,
+}
+
+/// A range of a file that reads as zeros without being stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Hole {
+    pub file_offset: u64,
+    pub len: u64,
 }
 
 /// A scanned volume.
@@ -175,6 +204,8 @@ pub fn scan_volume(src: &dyn BlockSource, part: &Partition) -> Result<Volume, Er
     let disk = disk::Disk::new(src, part.offset, part.len);
     let mut vol = if let Some(boot) = exfat::probe(&disk)? {
         exfat::scan(&disk, &boot)
+    } else if let Some(boot) = ntfs::probe(&disk)? {
+        ntfs::scan(&disk, &boot)
     } else if let Some(bpb) = fat::probe(&disk)? {
         fat::scan(&disk, &bpb)
     } else {
@@ -188,6 +219,9 @@ pub fn scan_volume(src: &dyn BlockSource, part: &Partition) -> Result<Volume, Er
 /// clusters were reused by a file that was itself deleted later. Marks them
 /// [`Confidence::Low`]. (Overlap with live files is already caught by the allocation
 /// state.)
+///
+/// On NTFS, whose times are precise UTC and set when a file is written to the volume, the
+/// file written last keeps the shared clusters: only the older one is demoted.
 fn demote_overlapping(entries: &mut [Entry]) {
     let mut spans: Vec<(Extent, usize)> = entries
         .iter()
@@ -205,7 +239,15 @@ fn demote_overlapping(entries: &mut [Entry]) {
             && x.offset < end
             && j != i
         {
-            for k in [i, j] {
+            let losers = match (
+                entries.get(i).and_then(last_write),
+                entries.get(j).and_then(last_write),
+            ) {
+                (Some(a), Some(b)) if a < b => [Some(i), None],
+                (Some(a), Some(b)) if a > b => [Some(j), None],
+                _ => [Some(i), Some(j)],
+            };
+            for k in losers.into_iter().flatten() {
                 if let Some(h) = hit.get_mut(k) {
                     *h = true;
                 }
@@ -220,6 +262,14 @@ fn demote_overlapping(entries: &mut [Entry]) {
             e.confidence = Confidence::Low;
         }
     }
+}
+
+/// When an NTFS entry's data was last written: the later of its creation time (when it
+/// arrived on the volume; copies keep only the modification time) and its modification
+/// time.
+fn last_write(e: &Entry) -> Option<Timestamp> {
+    e.record?;
+    e.created.max(e.modified)
 }
 
 /// A partition and the result of scanning its file system.

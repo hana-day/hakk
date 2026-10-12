@@ -1,4 +1,5 @@
-//! Timestamps as recorded by FAT and exFAT (local time, optionally with a UTC offset).
+//! Timestamps as recorded by FAT and exFAT (local time, optionally with a UTC offset) and
+//! NTFS (UTC).
 
 /// A local date and time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -10,7 +11,8 @@ pub struct Timestamp {
     pub minute: u8,
     pub second: u8,
     pub millis: u16,
-    /// Offset of the local time from UTC in minutes, if recorded (exFAT only).
+    /// Offset of the local time from UTC in minutes, if recorded (exFAT; `Some(0)` for NTFS,
+    /// which records UTC).
     pub utc_offset_minutes: Option<i16>,
 }
 
@@ -70,6 +72,60 @@ impl Timestamp {
     }
 }
 
+/// 100-nanosecond intervals per second, and days from 1601-01-01 (the FILETIME epoch) to
+/// 1970-01-01.
+const FILETIME_PER_SECOND: u64 = 10_000_000;
+const DAYS_1601_TO_1970: i64 = 134_774;
+
+impl Timestamp {
+    /// Decodes a Windows FILETIME (100 ns intervals since 1601-01-01 00:00 UTC), as NTFS
+    /// records it. Returns `None` for zero and for dates past the year 9999.
+    ///
+    /// Reference: Microsoft "FILETIME structure" (minwinbase.h) and "File Times"
+    /// (learn.microsoft.com); the day-to-date conversion is the proleptic Gregorian
+    /// "civil_from_days" algorithm described by Howard Hinnant in "chrono-Compatible
+    /// Low-Level Date Algorithms" (public domain).
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn from_filetime(ft: u64) -> Option<Self> {
+        if ft == 0 {
+            return None;
+        }
+        let secs = ft / FILETIME_PER_SECOND;
+        let millis = ((ft % FILETIME_PER_SECOND) / 10_000) as u16;
+        let days = i64::try_from(secs / 86_400).ok()? - DAYS_1601_TO_1970;
+        let rem = secs % 86_400;
+        let (year, month, day) = civil_from_days(days);
+        if !(1601..=9999).contains(&year) {
+            return None;
+        }
+        Some(Self {
+            year: year as u16,
+            month,
+            day,
+            hour: (rem / 3600) as u8,
+            minute: (rem / 60 % 60) as u8,
+            second: (rem % 60) as u8,
+            millis,
+            utc_offset_minutes: Some(0),
+        })
+    }
+}
+
+/// Days since 1970-01-01 to a (year, month, day) in the proleptic Gregorian calendar.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn civil_from_days(days: i64) -> (i64, u8, u8) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    (year, month, day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +153,23 @@ mod tests {
             Some(-15)
         );
         assert_eq!(t.with_exfat_utc_offset(0x40).utc_offset_minutes, None);
+    }
+
+    #[test]
+    fn decodes_filetime() {
+        // 2025-08-14 15:30:22.123 UTC
+        let unix = 1_755_185_422u64;
+        let ft = (unix + 11_644_473_600) * 10_000_000 + 1_230_000;
+        let t = Timestamp::from_filetime(ft).unwrap();
+        assert_eq!((t.year, t.month, t.day), (2025, 8, 14));
+        assert_eq!((t.hour, t.minute, t.second, t.millis), (15, 30, 22, 123));
+        assert_eq!(t.utc_offset_minutes, Some(0));
+        // Leap day, and the epoch itself.
+        let t = Timestamp::from_filetime((951_782_400 + 11_644_473_600) * 10_000_000).unwrap();
+        assert_eq!((t.year, t.month, t.day), (2000, 2, 29));
+        let t = Timestamp::from_filetime(1).unwrap();
+        assert_eq!((t.year, t.month, t.day, t.hour), (1601, 1, 1, 0));
+        assert_eq!(Timestamp::from_filetime(0), None);
+        assert_eq!(Timestamp::from_filetime(u64::MAX), None);
     }
 }

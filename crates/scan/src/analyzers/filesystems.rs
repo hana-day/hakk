@@ -143,16 +143,23 @@ fn to_new_file(e: &Entry, volume: &Volume) -> Option<NewFile> {
         volume: Some(volume.clone()),
         folder,
         name_exact: e.name_exact,
-        // Unique per volume: a deleted entry may share its path with a live one.
-        fs_ref: Some(format!(
-            "v{}:{}:{}:{}",
-            volume.index,
-            if e.deleted { "deleted" } else { "live" },
-            e.first_cluster,
-            e.path
-        )),
+        // Unique per volume: a deleted entry may share its path with a live one. NTFS
+        // entries are told apart by their MFT record.
+        fs_ref: Some(match e.record {
+            Some(record) => format!("v{}:mft{record}:{}", volume.index, e.path),
+            None => format!(
+                "v{}:{}:{}:{}",
+                volume.index,
+                if e.deleted { "deleted" } else { "live" },
+                e.first_cluster,
+                e.path
+            ),
+        }),
         deleted: e.deleted,
+        // The index cannot represent holes (NTFS sparse runs): the extents alone do not
+        // rebuild such a file.
         confidence: Some(match e.confidence {
+            _ if !e.holes.is_empty() => Confidence::Low,
             fs::Confidence::High => Confidence::High,
             fs::Confidence::Medium => Confidence::Medium,
             fs::Confidence::Low => Confidence::Low,
