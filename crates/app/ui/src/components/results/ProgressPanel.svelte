@@ -1,9 +1,10 @@
 <script lang="ts">
-  // Scan progress on one line: what is happening, a bar, and the numbers.
+  // Scan progress on one line: what is happening, the disk map as a band, and the numbers.
   import type { ScanProgress } from '../../lib/bindings/ScanProgress';
   import { formatBytes, formatCount } from '../../lib/format';
   import { t } from '../../lib/i18n';
   import Msg from '../Msg.svelte';
+  import DiskMap from './DiskMap.svelte';
 
   let { progress }: { progress: ScanProgress } = $props();
 
@@ -37,16 +38,7 @@
 <section aria-label={t('progress.label')} class="panel">
   <span class="title">{title}</span>
   <span class="step">{step}</span>
-  <div
-    class="bar"
-    role="progressbar"
-    aria-valuenow={percent}
-    aria-valuemin={0}
-    aria-valuemax={100}
-    aria-label={t('progress.label')}
-  >
-    <div style:width={`${percent}%`}></div>
-  </div>
+  <DiskMap map={progress.diskMap} {percent} errors={progress.readErrors} strip />
   <span class="stats">
     {#if retry}
       <span><Msg key="progress.retryLeft" params={{ bytes: formatBytes(retry.bytesLeft) }} /></span>
@@ -85,8 +77,6 @@
   }
   .title { font-size: 14px; font-weight: 700; white-space: nowrap; }
   .step { color: var(--text-3); white-space: nowrap; }
-  .bar { flex: 1 1 160px; min-width: 120px; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
-  .bar div { height: 100%; background: var(--brand); transition: width 0.2s linear; }
   .stats { display: inline-flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; color: var(--text-2); }
   .errors { color: var(--danger, #b2402b); }
   .percent { font-size: 16px; font-weight: 700; color: var(--text); }
