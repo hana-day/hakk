@@ -1,0 +1,60 @@
+# PNG images fragmented on a disk without a file system, in the CFReDS-style layouts.
+# Identical on every OS.
+name = "screenshots-fragments"
+seed = 23
+size = "128MiB"
+fs = "none"
+
+# Fragments in order, cut on 4 KiB cluster boundaries (NTFS).
+[[steps]]
+op = "place"
+kind = "png"
+count = 4
+min_size = "1MiB"
+max_size = "4MiB"
+layout = "sequential"
+fragments = [2, 4]
+align = "4KiB"
+
+# Fragments out of order.
+[[steps]]
+op = "place"
+kind = "png"
+count = 4
+min_size = "1MiB"
+max_size = "4MiB"
+layout = "shuffled"
+fragments = [3, 4]
+align = "4KiB"
+
+# One fragment missing: the image comes back broken where it is lost.
+[[steps]]
+op = "place"
+kind = "png"
+count = 2
+min_size = "1MiB"
+max_size = "3MiB"
+layout = "missing"
+fragments = [3, 4]
+align = "4KiB"
+
+# A whole image between the two halves of another.
+[[steps]]
+op = "place"
+kind = "png"
+count = 2
+min_size = "1MiB"
+max_size = "3MiB"
+layout = "nested"
+align = "4KiB"
+
+# Two images whose fragments alternate.
+[[steps]]
+op = "place"
+kind = "png"
+count = 2
+min_size = "2MiB"
+max_size = "4MiB"
+layout = "braided"
+fragments = [3, 5]
+align = "4KiB"

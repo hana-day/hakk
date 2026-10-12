@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, avi, fragments, heif, jpeg, mp4, mts, reader::Reader};
+use crate::{Found, Kind, Status, avi, fragments, heif, jpeg, mp4, mts, png, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -101,6 +101,7 @@ pub fn looks_like_header(head: &[u8]) -> bool {
     head.starts_with(&[0xFF, 0xD8, 0xFF])
         || head.get(4..8) == Some(b"ftyp")
         || avi::looks_like_avi(head)
+        || png::looks_like_png(head)
         || mts::looks_like_mts(head)
 }
 
@@ -155,6 +156,23 @@ pub fn carve_at<S: BlockSource + ?Sized>(
         if a.width > 0 && a.height > 0 {
             found.width = Some(a.width);
             found.height = Some(a.height);
+        }
+        return Some(found);
+    }
+    if png::looks_like_png(&head) {
+        let p = png::follow(r, at, opts.max_jpeg, opts.reassemble.as_ref())?;
+        let status = match p.status {
+            png::Status::Complete => Status::Complete,
+            png::Status::Corrupt { at } => Status::Corrupt { at },
+            png::Status::Truncated => Status::Truncated,
+        };
+        let mut found = Found {
+            fragments: p.fragments,
+            ..Found::contiguous(at, p.len, Kind::Png, status)
+        };
+        if p.width > 0 && p.height > 0 {
+            found.width = Some(p.width);
+            found.height = Some(p.height);
         }
         return Some(found);
     }

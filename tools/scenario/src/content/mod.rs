@@ -10,6 +10,7 @@ mod jpeg;
 pub(crate) mod mp4;
 mod mts;
 mod picture;
+mod png;
 pub mod profile;
 
 use anyhow::{Result, bail};
@@ -70,6 +71,8 @@ pub fn generate(
         (ContentKind::Mts, Some(name)) => bail!("mts files have no profiles yet ({name:?})"),
         (ContentKind::Avi, None) => avi::generate(target, rng),
         (ContentKind::Avi, Some(name)) => bail!("avi files have no profiles yet ({name:?})"),
+        (ContentKind::Png, None) => png::generate(target, rng),
+        (ContentKind::Png, Some(name)) => bail!("png files have no profiles yet ({name:?})"),
     }
 }
 
@@ -120,5 +123,6 @@ pub fn extension(kind: ContentKind) -> &'static str {
         ContentKind::Heic => "HEIC",
         ContentKind::Mts => "MTS",
         ContentKind::Avi => "AVI",
+        ContentKind::Png => "PNG",
     }
 }

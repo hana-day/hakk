@@ -110,6 +110,7 @@ fn to_new_file(f: Found) -> NewFile {
         carver::Kind::Heic => FileKind::Heic,
         carver::Kind::Mts => FileKind::Mts,
         carver::Kind::Avi => FileKind::Avi,
+        carver::Kind::Png => FileKind::Png,
     };
     let mut file = NewFile::carved(kind, f.offset, f.len);
     file.extents = f

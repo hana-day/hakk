@@ -15,6 +15,7 @@ pub mod mp4;
 pub mod mts;
 pub mod naive;
 pub mod pieces;
+pub mod png;
 pub mod reader;
 pub mod scan;
 
@@ -87,6 +88,7 @@ pub enum Kind {
     /// An AVCHD/BDAV transport stream (`.mts`/`.m2ts`).
     Mts,
     Avi,
+    Png,
 }
 
 impl Kind {
@@ -98,6 +100,7 @@ impl Kind {
             Kind::Heic => "heic",
             Kind::Mts => "mts",
             Kind::Avi => "avi",
+            Kind::Png => "png",
         }
     }
 }
