@@ -506,6 +506,64 @@ pub trait Helper: Send + Sync {
     fn repair(&self, request: RepairRequest) -> Result<(), HelperError>;
 }
 
+/// Messages between the GUI and a helper running as a separate process (one JSON object
+/// per line): the GUI sends [`Request`]s, the helper answers each with a
+/// [`HelperMessage::Reply`] carrying the same id, and sends events as they happen.
+pub mod wire {
+    use serde::{Deserialize, Serialize};
+
+    use super::{
+        Destination, Drive, DriveId, HelperError, HelperEvent, RecoveryId, RecoveryRequest,
+        RepairRequest, ScanId,
+    };
+
+    /// A call on [`super::Helper`].
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "call", rename_all = "camelCase")]
+    pub enum Call {
+        ListDrives,
+        OpenImage { path: String },
+        ListDestinations { source: DriveId },
+        StartScan { drive: DriveId },
+        PauseScan { scan: ScanId },
+        ResumeScan { scan: ScanId },
+        CancelScan { scan: ScanId },
+        Recover { request: RecoveryRequest },
+        Repair { request: RepairRequest },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct Request {
+        pub id: u64,
+        #[serde(flatten)]
+        pub call: Call,
+    }
+
+    /// The result of a [`Call`].
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "type", content = "value", rename_all = "camelCase")]
+    pub enum Answer {
+        Drives(Vec<Drive>),
+        Drive(Drive),
+        Destinations(Vec<Destination>),
+        Scan(ScanId),
+        Recovery(RecoveryId),
+        Done,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(tag = "message", rename_all = "camelCase")]
+    pub enum HelperMessage {
+        Reply {
+            id: u64,
+            result: Result<Answer, HelperError>,
+        },
+        Event {
+            event: HelperEvent,
+        },
+    }
+}
+
 /// All types the GUI needs bindings for. Exporting these exports their dependencies too.
 pub fn export_typescript(dir: &std::path::Path) -> Result<(), ts_rs::ExportError> {
     let cfg = ts_rs::Config::new().with_out_dir(dir);

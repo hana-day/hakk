@@ -10,9 +10,10 @@ use hakk_protocol::{Destination, DestinationId, DriveKind};
 /// Folder created inside a destination to hold recovered files.
 const FOLDER: &str = "hakk";
 
-/// Lists destinations. `blocked_device` is the device being scanned when that is a
-/// physical disk; destinations on it are refused (see [`same_device`]).
-pub(crate) fn destinations(blocked_device: Option<&Path>) -> Vec<Destination> {
+/// Lists destinations. `blocked_disk` is the whole physical disk being scanned (e.g.
+/// `disk4`); destinations stored on it are refused, since writing there could overwrite
+/// the deleted data being recovered.
+pub(crate) fn destinations(blocked_disk: Option<&str>) -> Vec<Destination> {
     let mut out = Vec::new();
     if let Some(pictures) = pictures_dir() {
         let name = pictures.file_name().map_or_else(
@@ -34,9 +35,11 @@ pub(crate) fn destinations(blocked_device: Option<&Path>) -> Vec<Destination> {
             &root,
         ));
     }
-    if let Some(device) = blocked_device {
+    if let Some(disk) = blocked_disk {
         for d in &mut out {
-            if same_device(Path::new(&d.path), device) {
+            // A destination whose disk cannot be told is refused too: better safe.
+            let on = crate::drives::disk_of(Path::new(&d.path));
+            if on.as_deref().is_none_or(|on| on == disk) {
                 d.blocked = Some(hakk_protocol::DestinationBlock::SameDeviceAsSource);
             }
         }
@@ -102,31 +105,6 @@ fn mounted_drives() -> Vec<(String, PathBuf)> {
     out
 }
 
-/// Whether `dest` lies on the device the scan reads. Writing there could overwrite the
-/// deleted data being recovered.
-#[cfg(unix)]
-pub(crate) fn same_device(dest: &Path, device: &Path) -> bool {
-    use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    // The destination folder may not exist yet; its nearest existing ancestor decides.
-    let Some(dest_dev) = dest.ancestors().find_map(|p| std::fs::metadata(p).ok()) else {
-        return false;
-    };
-    match std::fs::metadata(device) {
-        // For a device node, compare the device it is with the device the folder is on.
-        Ok(m) if m.file_type().is_block_device() || m.file_type().is_char_device() => {
-            m.rdev() == dest_dev.dev()
-        }
-        Ok(m) => m.dev() == dest_dev.dev(),
-        Err(_) => false,
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn same_device(dest: &Path, device: &Path) -> bool {
-    // Physical disks are not scanned on Windows yet; compare volume roots meanwhile.
-    dest.components().next() == device.components().next()
-}
-
 #[cfg(unix)]
 fn free_bytes(path: &Path) -> Option<u64> {
     use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
@@ -166,12 +144,6 @@ fn free_bytes(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_folder_is_on_its_own_device() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(same_device(&dir.path().join("hakk"), dir.path()));
-    }
 
     #[test]
     fn free_space_is_reported() {

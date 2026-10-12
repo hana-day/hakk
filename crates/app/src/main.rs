@@ -17,8 +17,13 @@ use crate::helper::mock::{MockConfig, MockHelper};
 /// Must match `HELPER_EVENT` in `ui/src/lib/api.ts`.
 const HELPER_EVENT: &str = "helper-event";
 
-/// `HAKK_HELPER=mock` runs the GUI against simulated drives instead of the real helper.
+/// `HAKK_HELPER=mock` runs the GUI against simulated drives instead of the real helper;
+/// `HAKK_HELPER=inprocess` runs the real helper inside the GUI without asking for
+/// administrator privileges (disk images only, unless the GUI itself runs as root).
 const HELPER_ENV: &str = "HAKK_HELPER";
+
+/// Text of the administrator password prompt.
+const ELEVATION_PROMPT: &str = "hakk needs administrator privileges to read drives directly.";
 
 /// Disk images to open at startup, separated like `PATH` (for development and tests).
 const OPEN_IMAGE_ENV: &str = "HAKK_OPEN_IMAGE";
@@ -38,11 +43,12 @@ fn mock_config() -> MockConfig {
     config
 }
 
-fn helper(sink: EventSink) -> Box<dyn Helper> {
-    if std::env::var(HELPER_ENV).is_ok_and(|v| v == "mock") {
-        return Box::new(MockHelper::new(sink, mock_config()));
+fn helper(sink: &dyn Fn() -> EventSink) -> Box<dyn Helper> {
+    let mode = std::env::var(HELPER_ENV).unwrap_or_default();
+    if mode == "mock" {
+        return Box::new(MockHelper::new(sink(), mock_config()));
     }
-    let helper = RealHelper::new(sink);
+    let helper = elevated(sink, &mode).unwrap_or_else(|| Box::new(RealHelper::new(sink())));
     if let Some(paths) = std::env::var_os(OPEN_IMAGE_ENV) {
         for path in std::env::split_paths(&paths) {
             if let Err(err) = helper.open_image(&path.to_string_lossy()) {
@@ -50,20 +56,81 @@ fn helper(sink: EventSink) -> Box<dyn Helper> {
             }
         }
     }
-    Box::new(helper)
+    helper
+}
+
+/// The helper in a separate process with administrator privileges, if the user grants
+/// them. `None` means the helper runs inside the GUI (already root, asked not to, the
+/// prompt was declined, or the system has no such helper yet).
+#[cfg(target_os = "macos")]
+fn elevated(sink: &dyn Fn() -> EventSink, mode: &str) -> Option<Box<dyn Helper>> {
+    // SAFETY: geteuid cannot fail and has no preconditions.
+    if mode == "inprocess" || unsafe { libc::geteuid() } == 0 {
+        return None;
+    }
+    match hakk_helper::remote::RemoteHelper::launch_elevated(sink(), ELEVATION_PROMPT) {
+        Ok(h) => Some(Box::new(h)),
+        Err(err) => {
+            eprintln!("running without administrator privileges: {err}");
+            None
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn elevated(_sink: &dyn Fn() -> EventSink, _mode: &str) -> Option<Box<dyn Helper>> {
+    None
+}
+
+/// `hakk --serve-helper SOCKET [--owner UID:GID]`: run as the elevated helper instead of
+/// the GUI. Returns whether it did.
+#[cfg(unix)]
+fn serve_helper() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(i) = args
+        .iter()
+        .position(|a| a == hakk_helper::remote::SERVE_ARG)
+    else {
+        return false;
+    };
+    let Some(socket) = args.get(i + 1) else {
+        eprintln!("{} needs a socket path", hakk_helper::remote::SERVE_ARG);
+        std::process::exit(2);
+    };
+    let owner = args
+        .iter()
+        .position(|a| a == "--owner")
+        .and_then(|j| args.get(j + 1))
+        .and_then(|o| hakk_helper::remote::parse_owner(o));
+    if let Err(err) = hakk_helper::remote::serve(std::path::Path::new(socket), owner) {
+        eprintln!("helper: {err}");
+        std::process::exit(1);
+    }
+    true
+}
+
+#[cfg(not(unix))]
+fn serve_helper() -> bool {
+    false
 }
 
 fn main() {
+    if serve_helper() {
+        return;
+    }
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
-            let sink: EventSink = Box::new(move |event| {
-                if let Err(err) = handle.emit(HELPER_EVENT, &event) {
-                    eprintln!("failed to forward a helper event: {err}");
-                }
-            });
-            app.manage(HelperState(helper(sink)));
+            let sink = move || -> EventSink {
+                let handle = handle.clone();
+                Box::new(move |event| {
+                    if let Err(err) = handle.emit(HELPER_EVENT, &event) {
+                        eprintln!("failed to forward a helper event: {err}");
+                    }
+                })
+            };
+            app.manage(HelperState(helper(&sink)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

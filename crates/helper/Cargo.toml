@@ -9,12 +9,17 @@ publish.workspace = true
 [dependencies]
 blocksource = { path = "../blocksource" }
 crossbeam-channel = "0.5.17"
+serde = "1.0.229"
+serde_json = "1.0.151"
 hakk-protocol = { path = "../protocol" }
 index = { path = "../index" }
 scan = { path = "../scan" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.10.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

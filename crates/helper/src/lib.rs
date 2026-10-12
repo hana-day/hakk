@@ -9,16 +9,19 @@
 //! - A recovery reads through the scan's foreground lease while the scan runs, so the scan
 //!   pauses and resumes at the same position (see [`scan::ScanHandle::foreground`]).
 //!
-//! For now it runs inside the GUI process and scans disk images only. Running it as a
-//! separate, elevated process and listing physical drives come next.
+//! Drives are disk images opened by the user and, on macOS, the physical disks attached
+//! (see [`drives`]). Reading a physical disk needs administrator privileges.
 
 mod convert;
+mod drives;
 mod places;
 mod recovery;
+#[cfg(unix)]
+pub mod remote;
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -27,7 +30,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use blocksource::{BlockSource, ImageFile};
+use blocksource::{Aligned, BlockSource, Device, ImageFile};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use hakk_protocol::{
     Destination, Drive, DriveId, DriveKind, EventSink, FileKind, FileMerge, FileStatus, FileUpdate,
@@ -40,8 +43,13 @@ use scan::{Analyzer, Event, Outcome, Scan, ScanHandle};
 /// Builds the analyzers for each new scan (they keep per-scan state).
 pub type AnalyzerFactory = Arc<dyn Fn() -> Vec<Box<dyn Analyzer>> + Send + Sync>;
 
-/// Lists destinations; the argument is the scanned device when it is a physical disk.
-type PlaceLister = Box<dyn Fn(Option<&Path>) -> Vec<Destination> + Send + Sync>;
+/// Lists destinations; the argument is the whole disk being scanned (e.g. `disk4`) when it
+/// is a physical disk, whose volumes are then blocked.
+type PlaceLister = Box<dyn Fn(Option<&str>) -> Vec<Destination> + Send + Sync>;
+
+/// A drive opened for reading: the source, its label, and the whole physical disk if it
+/// is one.
+type Opened = (Arc<dyn BlockSource>, String, Option<String>);
 
 /// How often the index is read for new and changed files.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -54,6 +62,10 @@ struct Shared {
     sink: EventSink,
     analyzers: AnalyzerFactory,
     places: PlaceLister,
+    /// Lists the physical drives attached now.
+    disks: fn() -> Vec<drives::PhysicalDrive>,
+    /// (user id, group id) that recovered files are given to.
+    owner: Mutex<Option<(u32, u32)>>,
     work_dir: PathBuf,
     state: Mutex<State>,
 }
@@ -61,6 +73,8 @@ struct Shared {
 #[derive(Default)]
 struct State {
     images: Vec<Image>,
+    /// Physical drives as last listed.
+    disks: Vec<drives::PhysicalDrive>,
     next_scan: u64,
     next_recovery: u64,
     scan: Option<ActiveScan>,
@@ -75,6 +89,8 @@ struct Image {
 struct ActiveScan {
     id: ScanId,
     source: Arc<dyn BlockSource>,
+    /// The whole physical disk scanned, if it is one (its volumes cannot be destinations).
+    disk: Option<String>,
     handle: Arc<ScanHandle>,
     index_path: PathBuf,
     /// Set once the scan has finished or been cancelled.
@@ -90,25 +106,50 @@ impl RealHelper {
     /// `analyzers` builds the analyzers for each scan. Indexes go into a `hakk` folder in
     /// the system's temporary directory.
     pub fn with_analyzers(sink: EventSink, analyzers: AnalyzerFactory) -> Self {
-        Self::with_options(
+        Self::build(
             sink,
             analyzers,
             std::env::temp_dir().join("hakk"),
             Box::new(places::destinations),
+            drives::list,
         )
     }
 
+    /// Gives recovered files to this user (user id, group id) instead of the user the
+    /// helper runs as (root, when elevated).
+    pub fn set_owner(&mut self, owner: Option<(u32, u32)>) {
+        *self
+            .shared
+            .owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = owner;
+    }
+
+    /// A helper for tests: no physical drives, the given work folder and destinations.
+    #[cfg(test)]
     fn with_options(
         sink: EventSink,
         analyzers: AnalyzerFactory,
         work_dir: PathBuf,
         places: PlaceLister,
     ) -> Self {
+        Self::build(sink, analyzers, work_dir, places, Vec::new)
+    }
+
+    fn build(
+        sink: EventSink,
+        analyzers: AnalyzerFactory,
+        work_dir: PathBuf,
+        places: PlaceLister,
+        disks: fn() -> Vec<drives::PhysicalDrive>,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 sink,
                 analyzers,
                 places,
+                disks,
+                owner: Mutex::new(None),
                 work_dir,
                 state: Mutex::new(State::default()),
             }),
@@ -117,6 +158,10 @@ impl RealHelper {
 }
 
 impl Shared {
+    fn state_owner(&self) -> Option<(u32, u32)> {
+        *self.owner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         // A panic while holding the lock leaves the state usable; ignore poisoning.
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -133,6 +178,41 @@ impl State {
             .iter()
             .find(|i| i.drive.id == *id)
             .ok_or(HelperError::DriveNotFound)
+    }
+
+    fn disk(&self, id: &DriveId) -> Result<&drives::PhysicalDrive, HelperError> {
+        self.disks
+            .iter()
+            .find(|d| d.drive.id == *id)
+            .ok_or(HelperError::DriveNotFound)
+    }
+
+    /// Opens a drive for reading: `(source, label, whole disk if physical)`.
+    fn open(&self, id: &DriveId) -> Result<Opened, HelperError> {
+        if drives::is_physical(id) {
+            let disk = self.disk(id)?;
+            let device = Device::open(&disk.device).map_err(|e| HelperError::CannotOpen {
+                detail: if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(
+                        "{}: administrator privileges are needed",
+                        disk.device.display()
+                    )
+                } else {
+                    format!("{}: {e}", disk.device.display())
+                },
+            })?;
+            // Raw devices take only sector-aligned reads.
+            return Ok((
+                Arc::new(Aligned::new(device)),
+                disk.drive.name.clone(),
+                Some(disk.disk.clone()),
+            ));
+        }
+        let image = self.image(id)?;
+        let source = ImageFile::open(&image.path).map_err(|e| HelperError::CannotOpen {
+            detail: e.to_string(),
+        })?;
+        Ok((Arc::new(source), image.drive.name.clone(), None))
     }
 
     fn scan(&self, id: ScanId) -> Result<&ActiveScan, HelperError> {
@@ -159,12 +239,14 @@ fn internal(err: impl std::fmt::Display) -> HelperError {
 
 impl Helper for RealHelper {
     fn list_drives(&self) -> Result<Vec<Drive>, HelperError> {
-        Ok(self
-            .shared
-            .state()
-            .images
+        let disks = (self.shared.disks)();
+        let mut state = self.shared.state();
+        state.disks = disks;
+        Ok(state
+            .disks
             .iter()
-            .map(|i| i.drive.clone())
+            .map(|d| d.drive.clone())
+            .chain(state.images.iter().map(|i| i.drive.clone()))
             .collect())
     }
 
@@ -196,21 +278,21 @@ impl Helper for RealHelper {
     }
 
     fn list_destinations(&self, source: &DriveId) -> Result<Vec<Destination>, HelperError> {
+        let state = self.shared.state();
         // Images are regular files: writing next to them cannot overwrite their content.
-        self.shared.state().image(source)?;
-        Ok((self.shared.places)(None))
+        let disk = if drives::is_physical(source) {
+            Some(state.disk(source)?.disk.clone())
+        } else {
+            state.image(source)?;
+            None
+        };
+        drop(state);
+        Ok((self.shared.places)(disk.as_deref()))
     }
 
     fn start_scan(&self, drive: &DriveId) -> Result<ScanId, HelperError> {
         let mut state = self.shared.state();
-        let image = state.image(drive)?;
-        let source: Arc<dyn BlockSource> =
-            Arc::new(
-                ImageFile::open(&image.path).map_err(|e| HelperError::CannotOpen {
-                    detail: e.to_string(),
-                })?,
-            );
-        let label = image.drive.name.clone();
+        let (source, label, disk) = state.open(drive)?;
         if let Some(previous) = state.scan.take() {
             previous.handle.cancel();
         }
@@ -251,6 +333,7 @@ impl Helper for RealHelper {
         state.scan = Some(ActiveScan {
             id,
             source,
+            disk,
             handle,
             index_path,
             ended,
@@ -281,14 +364,16 @@ impl Helper for RealHelper {
         if state.recovering {
             return Err(HelperError::RecoveryInProgress);
         }
-        let destination = (self.shared.places)(None)
+        let scan = state.scan(request.scan_id)?;
+        // Checked again here: the GUI's list may be stale, and a volume on the scanned disk
+        // must never receive files.
+        let destination = (self.shared.places)(scan.disk.as_deref())
             .into_iter()
             .find(|d| d.id == request.destination)
             .ok_or(HelperError::DestinationNotFound)?;
         if let Some(reason) = destination.blocked {
             return Err(HelperError::DestinationBlocked { reason });
         }
-        let scan = state.scan(request.scan_id)?;
         // While the scan runs, read through a foreground lease so the scan pauses instead
         // of fighting over the disk head; afterwards read the source directly.
         let source: Box<dyn BlockSource> = if scan.ended.load(Ordering::Acquire) {
@@ -303,6 +388,7 @@ impl Helper for RealHelper {
             files: request.files,
             folder: PathBuf::from(destination.path),
             index_path,
+            owner: self.shared.state_owner(),
         };
         let id = job.id;
         state.recovering = true;

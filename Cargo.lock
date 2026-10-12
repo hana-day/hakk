@@ -1276,6 +1276,7 @@ version = "0.0.0"
 dependencies = [
  "hakk-helper",
  "hakk-protocol",
+ "libc",
  "serde",
  "serde_json",
  "tauri",
@@ -1302,7 +1303,9 @@ dependencies = [
  "hakk-protocol",
  "index",
  "libc",
+ "plist",
  "scan",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",

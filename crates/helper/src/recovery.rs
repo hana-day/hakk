@@ -30,6 +30,9 @@ pub(crate) struct Job {
     /// Folder the per-day subfolders are created in.
     pub folder: PathBuf,
     pub index_path: PathBuf,
+    /// (user id, group id) to give the written files and folders to: the GUI's user when
+    /// the helper runs as root.
+    pub owner: Option<(u32, u32)>,
 }
 
 struct Item {
@@ -98,9 +101,32 @@ pub(crate) fn run(
         progress.files_done += 1;
     }
     progress.bytes_done = total;
+    if let Some((uid, gid)) = job.owner {
+        hand_over(&job.folder, uid, gid);
+    }
     emit(HelperEvent::RecoveryProgress(progress));
     report
 }
+
+/// Gives `dir` and everything in it to the user `uid` (group `gid`).
+#[cfg(unix)]
+fn hand_over(dir: &Path, uid: u32, gid: u32) {
+    let _ = std::os::unix::fs::lchown(dir, Some(uid), Some(gid));
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            hand_over(&path, uid, gid);
+        } else {
+            let _ = std::os::unix::fs::lchown(&path, Some(uid), Some(gid));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn hand_over(_dir: &Path, _uid: u32, _gid: u32) {}
 
 fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
