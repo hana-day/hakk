@@ -1,0 +1,60 @@
+# Camcorder clips fragmented on a disk without a file system, in the CFReDS-style layouts:
+# how a full hard disk scatters long videos. Identical on every OS.
+name = "camcorder-fragments"
+seed = 11
+size = "384MiB"
+fs = "none"
+
+# Fragments in order, cut on 32 KiB cluster boundaries.
+[[steps]]
+op = "place"
+kind = "mts"
+count = 3
+min_size = "12MiB"
+max_size = "24MiB"
+layout = "sequential"
+fragments = [3, 6]
+align = "32KiB"
+
+# Fragments out of order.
+[[steps]]
+op = "place"
+kind = "mts"
+count = 3
+min_size = "12MiB"
+max_size = "24MiB"
+layout = "shuffled"
+fragments = [3, 5]
+align = "32KiB"
+
+# One fragment missing: the clip comes back broken where it is lost.
+[[steps]]
+op = "place"
+kind = "mts"
+count = 2
+min_size = "8MiB"
+max_size = "16MiB"
+layout = "missing"
+fragments = [3, 4]
+align = "32KiB"
+
+# A whole clip between the two halves of another.
+[[steps]]
+op = "place"
+kind = "mts"
+count = 2
+min_size = "8MiB"
+max_size = "16MiB"
+layout = "nested"
+align = "32KiB"
+
+# Two clips whose fragments alternate.
+[[steps]]
+op = "place"
+kind = "mts"
+count = 2
+min_size = "16MiB"
+max_size = "24MiB"
+layout = "braided"
+fragments = [4, 8]
+align = "32KiB"

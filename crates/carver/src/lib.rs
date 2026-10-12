@@ -50,11 +50,16 @@ impl Found {
         }
     }
 
-    /// Whether the span `offset..offset + len` belongs to this file, so a scan need not look
-    /// for other files' headers inside it: a complete contiguous file, or a transport
+    /// The fragments that surely belong to this file, so a scan need not look for other
+    /// files' headers inside them: those of a complete contiguous file, or of a transport
     /// stream (whose packets repeat table headers throughout, broken or not).
-    pub fn covers_its_span(&self) -> bool {
-        self.fragments.len() == 1 && (self.status == Status::Complete || self.kind == Kind::Mts)
+    pub fn claimed(&self) -> &[(u64, u64)] {
+        let single = self.fragments.len() == 1 && self.status == Status::Complete;
+        if single || self.kind == Kind::Mts {
+            &self.fragments
+        } else {
+            &[]
+        }
     }
 
     /// Reads the file's bytes, joining its fragments.

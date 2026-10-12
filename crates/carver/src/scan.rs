@@ -16,7 +16,8 @@ pub struct Options {
     pub max_jpeg: u64,
     /// Longest video to follow.
     pub max_video: u64,
-    /// Search for the missing fragments of broken JPEGs (`None` to skip it).
+    /// Search for the missing fragments of broken JPEGs and transport streams (`None` to
+    /// skip it).
     pub reassemble: Option<fragments::Options>,
 }
 
@@ -41,6 +42,8 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
     let mut found = Vec::new();
     let mut pos = 0u64;
     let mut skip_until = 0u64;
+    // Later fragments of files found, which repeat table headers (transport streams).
+    let mut claimed: Vec<(u64, u64)> = Vec::new();
     while pos < src.len() {
         let Ok(n) = src.read_at(pos, &mut buf) else {
             // Unreadable: move on (bad ranges are retried by the scan pipeline, not here).
@@ -60,20 +63,31 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
                 .get(off..off + HEADER_LEN)
                 .or_else(|| data.get(off..))
                 .unwrap_or_default();
-            let hit = if looks_like_header(head) {
+            let hit = if looks_like_header(head)
+                && !claimed.iter().any(|&(o, l)| (o..o + l).contains(&at))
+            {
                 carve_at(&mut parse, at, opts)
             } else {
                 None
             };
             if let Some(f) = hit {
-                if f.covers_its_span() {
-                    skip_until = at + f.len;
+                if let Some(&(first, len)) = f.claimed().first()
+                    && first == at
+                {
+                    skip_until = at + len;
                 }
+                claimed.extend(f.claimed().iter().skip(1));
                 found.push(f);
             }
         }
         pos += n as u64;
     }
+    // A later fragment placed before its file's start was found as a file of its own.
+    let inner: Vec<(u64, u64)> = found
+        .iter()
+        .flat_map(|f| f.claimed().iter().skip(1).copied())
+        .collect();
+    found.retain(|f| !inner.iter().any(|&(o, l)| (o..o + l).contains(&f.offset)));
     found
 }
 
@@ -100,13 +114,16 @@ pub fn carve_at<S: BlockSource + ?Sized>(
 ) -> Option<Found> {
     let head = r.slice(at, 8)?.to_vec();
     if r.slice(at, HEADER_LEN).is_some_and(mts::looks_like_mts) {
-        let m = mts::carve(r, at, opts.max_video)?;
+        let m = mts::follow(r, at, opts.max_video, opts.reassemble.as_ref())?;
         let status = match m.status {
             mts::Status::Complete => Status::Complete,
             mts::Status::Corrupt { at } => Status::Corrupt { at },
             mts::Status::Truncated => Status::Truncated,
         };
-        return Some(Found::contiguous(at, m.len, Kind::Mts, status));
+        return Some(Found {
+            fragments: m.fragments,
+            ..Found::contiguous(at, m.len, Kind::Mts, status)
+        });
     }
     if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
         let j = jpeg::carve(r, at, opts.max_jpeg)?;

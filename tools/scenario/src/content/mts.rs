@@ -3,10 +3,12 @@
 //! 192-byte source packets (a 4-byte header with a 30-bit arrival time stamp, then a
 //! 188-byte transport packet), starting with the program association table and
 //! following the PIDs AVCHD uses: PAT 0x0000, SIT 0x001F, PMT 0x0100, PCR 0x1001, video
-//! 0x1011 (H.264), audio 0x1100 (AC-3). Continuity counters count per PID and the arrival
-//! clock advances at about 24 Mbit/s. Payloads are random bytes (PES headers on the first
-//! packet of each unit), so the structure is valid but nothing plays. The file is a whole
-//! number of aligned units (32 packets, 6144 bytes).
+//! 0x1011 (H.264), audio 0x1100 (AC-3), with null packets (0x1FFF) as padding. The tables
+//! repeat about every 1670 packets, as camcorders write them. Continuity counters count
+//! per PID and the arrival clock advances at about 24 Mbit/s, unevenly and with an
+//! occasional pause. Payloads are random bytes (PES headers on the first packet of each
+//! unit), so the structure is valid but nothing plays. The file is a whole number of
+//! aligned units (32 packets, 6144 bytes).
 //!
 //! Reference: ISO/IEC 13818-1 2.4.3 (transport packets), 2.4.3.6 (PES packets); the BDAV
 //! source packet format used by AVCHD (TP_extra_header, aligned units).
@@ -18,14 +20,18 @@ use crate::rng::Rng;
 
 const PACKET: usize = 192;
 const UNIT: usize = 32 * PACKET;
-/// Arrival clock ticks (27 MHz) per packet at about 24 Mbit/s.
-const ATS_STEP: u32 = 1728;
+/// Arrival clock ticks (27 MHz) per packet at about 24 Mbit/s, varying between these.
+const ATS_STEP: (u64, u64) = (1400, 2200);
+/// Packets between repeats of the tables.
+const TABLES_EVERY: usize = 1670;
 
 const PAT: u16 = 0x0000;
 const SIT: u16 = 0x001F;
 const PMT: u16 = 0x0100;
 const VIDEO: u16 = 0x1011;
 const AUDIO: u16 = 0x1100;
+const PCR: u16 = 0x1001;
+const NULL: u16 = 0x1FFF;
 
 pub fn generate(target: u64, rng: &mut Rng) -> Generated {
     let units = usize::try_from(target).unwrap_or(0).div_ceil(UNIT).max(1);
@@ -34,13 +40,16 @@ pub fn generate(target: u64, rng: &mut Rng) -> Generated {
     let mut cc: HashMap<u16, u8> = HashMap::new();
     let mut ats = u32::try_from(rng.range(0, 0x3FFF_FFFF)).unwrap_or(0);
     for i in 0..packets {
-        // Tables at the start and every 100 packets; otherwise mostly video, some audio.
-        let (pid, start) = match i % 100 {
+        // Tables at the start and then now and again; otherwise mostly video, some audio
+        // and padding.
+        let (pid, start) = match i % TABLES_EVERY {
             0 => (PAT, true),
             1 => (PMT, true),
             2 if i == 2 => (SIT, true),
-            k if k % 12 == 5 => (AUDIO, k == 5),
-            k => (VIDEO, k == 3),
+            2 => (PCR, false),
+            k if k % 31 == 7 => (NULL, false),
+            k if k % 12 == 5 => (AUDIO, k % 600 == 5),
+            k => (VIDEO, k % 300 == 3),
         };
         let counter = cc.entry(pid).or_insert(0x0F);
         *counter = (*counter + 1) & 0x0F;
@@ -59,7 +68,12 @@ pub fn generate(target: u64, rng: &mut Rng) -> Generated {
             payload.splice(..6, [0x00, 0x00, 0x01, stream, 0x00, 0x00]);
         }
         out.extend(payload);
-        ats = ats.wrapping_add(ATS_STEP);
+        let step = if rng.range(0, 500) == 0 {
+            rng.range(15_000, 45_000)
+        } else {
+            rng.range(ATS_STEP.0, ATS_STEP.1)
+        };
+        ats = ats.wrapping_add(u32::try_from(step).unwrap_or(0));
     }
     Generated {
         bytes: out,
