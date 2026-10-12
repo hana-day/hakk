@@ -1,4 +1,5 @@
 //! Windows: creates a fixed-size VHD with `diskpart` and attaches it with `Mount-DiskImage`.
+//! Formats with `Format-Volume` (exFAT, FAT32, FAT, NTFS).
 //!
 //! Windows cannot create volumes on a disk without a partition table, so one MBR
 //! partition is created. A fixed VHD is "disk contents + a 512-byte footer", so its first
@@ -29,6 +30,7 @@ impl Vhd {
             FsKind::Exfat => "exFAT",
             FsKind::Fat32 => "FAT32",
             FsKind::Fat12 | FsKind::Fat16 => "FAT",
+            FsKind::Ntfs => "NTFS",
             FsKind::None => bail!("no OS driver for disks without a file system"),
         };
         let base = format!(

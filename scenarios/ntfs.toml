@@ -1,0 +1,33 @@
+# NTFS (an HDD's file system): photos fill most of the disk, half are deleted, then videos
+# larger than any of the holes left behind are written (so they fragment) and deleted
+# again. A deleted NTFS file keeps its data runs, so even the fragmented videos should be
+# placed exactly. Built on Linux (mkfs.ntfs + ntfs-3g) and Windows; skipped on macOS,
+# which cannot write NTFS.
+name = "ntfs"
+seed = 11
+size = "64MiB"
+fs = "ntfs"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+count = 70
+min_size = "300KiB"
+max_size = "900KiB"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+[[steps]]
+op = "write"
+kind = "mp4"
+count = 3
+min_size = "3MiB"
+max_size = "6MiB"
+dir = "DCIM/101HAKK"
+
+[[steps]]
+op = "delete"
+fraction = 0.7
+dir = "DCIM/101HAKK"

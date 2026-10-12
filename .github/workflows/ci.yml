@@ -104,10 +104,11 @@ jobs:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       # The runner kernel lacks the exFAT driver by default; load it from the extra modules.
+      # NTFS scenarios use mkfs.ntfs and ntfs-3g (which keeps deleted MFT records intact).
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y exfatprogs "linux-modules-extra-$(uname -r)"
+          sudo apt-get install -y exfatprogs ntfs-3g "linux-modules-extra-$(uname -r)"
           sudo modprobe exfat
       # Windows sends TRIM to the whole volume on format, and the VHD driver zeroes those
       # ranges, unlike SD cards and HDDs. Disable delete notifications on this throwaway VM.

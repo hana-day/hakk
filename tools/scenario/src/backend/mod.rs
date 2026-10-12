@@ -1,7 +1,9 @@
 //! Drives file systems through the real OS drivers.
 //!
 //! - macOS: `hdiutil` + `newfs_exfat` / `newfs_msdos` (no admin rights needed)
-//! - Linux: `mkfs.exfat` / `mkfs.fat` + loop devices (needs `sudo`; for CI)
+//! - Linux: `mkfs.exfat` / `mkfs.fat` / `mkfs.ntfs` + loop devices (needs `sudo`; for CI).
+//!   NTFS is mounted with `ntfs-3g`, which (like Windows) leaves a deleted file's MFT
+//!   record in place; the kernel's `ntfs3` driver wipes it.
 //! - Windows: fixed-size VHD + `Mount-DiskImage` (needs admin; always one MBR partition)
 
 #[cfg(target_os = "linux")]
@@ -62,7 +64,7 @@ impl Format {
             FsKind::Fat16 if len < 32 << 20 => 0x04,
             FsKind::Fat16 => 0x06,
             FsKind::Fat32 => 0x0C,
-            FsKind::Exfat | FsKind::None => 0x07,
+            FsKind::Exfat | FsKind::Ntfs | FsKind::None => 0x07,
         }
     }
 }

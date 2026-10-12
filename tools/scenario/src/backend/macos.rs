@@ -37,6 +37,9 @@ impl Backend for Hdiutil {
                 c.args(["-F", fat_bits(f.fs)]);
                 c
             }
+            FsKind::Ntfs => {
+                bail!("macOS cannot write NTFS; build NTFS scenarios on Linux or Windows")
+            }
             FsKind::None => bail!("no OS driver for disks without a file system"),
         };
         cmd.args(["-v", &f.label]);

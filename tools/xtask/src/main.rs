@@ -65,7 +65,10 @@ fn bench(args: &[String]) -> Result<()> {
         "-p",
         "hakk-eval",
     ]))?;
-    let bin = root.join("target/release");
+    // Where `cargo build` put them (`CARGO_TARGET_DIR` moves the target directory).
+    let bin = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| root.join("target"), |d| root.join(d))
+        .join("release");
     let photorec = which(&exe("photorec"));
     if photorec.is_none() {
         eprintln!("photorec not found, skipping it (brew install testdisk / apt install testdisk)");
@@ -78,6 +81,10 @@ fn bench(args: &[String]) -> Result<()> {
             .context("invalid scenario file name")?
             .to_string_lossy()
             .into_owned();
+        if cfg!(target_os = "macos") && scenario_fs(sc)?.as_deref() == Some("ntfs") {
+            eprintln!("== {name}: skipped (macOS cannot write NTFS)");
+            continue;
+        }
         let dir = Path::new(WORK).join(&name);
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
@@ -139,6 +146,20 @@ fn bench(args: &[String]) -> Result<()> {
         serde_json::to_string_pretty(&reports)?,
     )?;
     Ok(())
+}
+
+/// The `fs = "..."` value of a scenario file.
+fn scenario_fs(path: &Path) -> Result<Option<String>> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(text.lines().find_map(|line| {
+        let value = line
+            .trim()
+            .strip_prefix("fs")?
+            .trim_start()
+            .strip_prefix('=')?;
+        Some(value.trim().trim_matches('"').to_owned())
+    }))
 }
 
 /// Recovers with the minimal carver, writing files to `out`.

@@ -8,7 +8,8 @@ use anyhow::{Result, bail};
 use super::{Backend, Format, Mounted, run, temp_mount_dir};
 use crate::scenario::FsKind;
 
-/// `mkfs.exfat` / `mkfs.fat` and loop devices (`sudo losetup`, `sudo mount`). For CI.
+/// `mkfs.exfat` / `mkfs.fat` / `mkfs.ntfs` and loop devices (`sudo losetup`, `sudo mount`,
+/// `sudo ntfs-3g`). For CI.
 pub struct Loop(pub Format);
 
 impl Backend for Loop {
@@ -43,6 +44,16 @@ impl Backend for Loop {
                     cmd.args(["-h", &start.to_string()]);
                 }
             }
+            FsKind::Ntfs => {
+                // Quick format, and no questions about the loop device's geometry.
+                cmd.args(["mkfs.ntfs", "--quick", "--force", "-L", &f.label]);
+                if let Some(c) = f.cluster {
+                    cmd.args(["-c", &c.to_string()]);
+                }
+                if let Some(start) = f.partition_start {
+                    cmd.args(["--partition-start", &start.to_string()]);
+                }
+            }
             FsKind::None => bail!("no OS driver for disks without a file system"),
         }
         let result = run(cmd.arg(&dev));
@@ -56,21 +67,22 @@ impl Backend for Loop {
         let root = temp_mount_dir()?;
         let uid = run(Command::new("id").arg("-u"))?;
         let gid = run(Command::new("id").arg("-g"))?;
-        let ty = if f.fs == FsKind::Exfat {
-            "exfat"
-        } else {
-            "vfat"
-        };
         let opts = format!("uid={},gid={}", uid.trim(), gid.trim());
-        if let Err(e) = run(Command::new("sudo")
-            .args(["mount", "-t", ty, "-o", &opts])
-            .arg(&dev)
-            .arg(&root))
-        {
+        let mut cmd = Command::new("sudo");
+        match f.fs {
+            FsKind::Exfat => cmd.args(["mount", "-t", "exfat", "-o", &opts]),
+            FsKind::Ntfs => cmd.args(["ntfs-3g", "-o", &opts]),
+            _ => cmd.args(["mount", "-t", "vfat", "-o", &opts]),
+        };
+        if let Err(e) = run(cmd.arg(&dev).arg(&root)) {
             detach(&dev)?;
             return Err(e);
         }
-        Ok(Box::new(Volume { root, dev }))
+        Ok(Box::new(Volume {
+            root,
+            dev,
+            fuse: f.fs == FsKind::Ntfs,
+        }))
     }
 }
 
@@ -96,6 +108,8 @@ fn detach(dev: &str) -> Result<()> {
 struct Volume {
     root: PathBuf,
     dev: String,
+    /// Mounted by a FUSE daemon (`ntfs-3g`), which may still be writing after `umount`.
+    fuse: bool,
 }
 
 impl Mounted for Volume {
@@ -106,7 +120,27 @@ impl Mounted for Volume {
     fn unmount(self: Box<Self>) -> Result<()> {
         run(&mut Command::new("sync"))?;
         run(Command::new("sudo").arg("umount").arg(&self.root))?;
+        if self.fuse {
+            wait_for_daemon(&self.dev)?;
+        }
         let _ = std::fs::remove_dir(&self.root);
         detach(&self.dev)
     }
+}
+
+/// Waits until the FUSE daemon serving `dev` has exited, so its last writes are on disk
+/// before the image is read.
+fn wait_for_daemon(dev: &str) -> Result<()> {
+    let pattern = format!("ntfs-3g .*{dev} ");
+    for _ in 0..600 {
+        let running = Command::new("pgrep")
+            .args(["-f", &pattern])
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !running {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    bail!("ntfs-3g for {dev} did not exit within 60 s of unmounting")
 }

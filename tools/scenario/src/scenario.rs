@@ -38,6 +38,8 @@ pub enum FsKind {
     Fat12,
     Fat16,
     Fat32,
+    /// Needs Linux (`mkfs.ntfs` and `ntfs-3g`) or Windows: macOS cannot write NTFS.
+    Ntfs,
     /// No file system: files are placed directly on the disk with `place` steps, like the
     /// NIST CFReDS carving images. No OS driver is involved, so results match on every OS.
     None,

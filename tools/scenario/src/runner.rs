@@ -258,12 +258,15 @@ fn partition_offset(image: &[u8]) -> u64 {
 }
 
 /// The file system type named in a boot sector, if any.
-/// Reference: Microsoft "exFAT file system specification" 3.1.2 (FileSystemName);
+/// Reference: Microsoft "exFAT file system specification" 3.1.2 (FileSystemName); the NTFS
+/// boot sector's OEM ID "NTFS    " at 3 (Microsoft "NTFS overview", Boot Sector);
 /// Microsoft "FAT32 File System Specification" (fatgen103) BS_FilSysType at 54 / 82.
 fn detect_fs(vbr: &[u8]) -> Option<&'static str> {
     let at = |r: std::ops::Range<usize>| vbr.get(r).unwrap_or_default();
     if at(3..11) == b"EXFAT   " {
         Some("exfat")
+    } else if at(3..11) == b"NTFS    " {
+        Some("ntfs")
     } else if at(82..90) == b"FAT32   " {
         Some("fat32")
     } else if at(54..62) == b"FAT12   " {
@@ -287,6 +290,20 @@ fn volume_info(image: &[u8]) -> (Option<String>, Option<u64>) {
             let bps = u32::from(*vbr.get(108).unwrap_or(&0));
             let spc = u32::from(*vbr.get(109).unwrap_or(&0));
             1u64.checked_shl(bps + spc)
+        }
+        Some("ntfs") => {
+            // Sectors per cluster above 0x80 encode 2^(256 - n).
+            let bps = vbr
+                .get(11..13)
+                .and_then(|b| <[u8; 2]>::try_from(b).ok())
+                .map_or(0, u16::from_le_bytes);
+            let spc = *vbr.get(13).unwrap_or(&0);
+            let spc = if spc <= 0x80 {
+                Some(u64::from(spc))
+            } else {
+                1u64.checked_shl(256 - u32::from(spc))
+            };
+            spc.map(|s| u64::from(bps) * s)
         }
         Some(_) => {
             let bps = vbr

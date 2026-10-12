@@ -92,7 +92,7 @@ fn recover(image: &Path, out: &Path) -> Result<Vec<Entry>> {
         for e in vol
             .entries
             .iter()
-            .filter(|e| !e.is_dir && e.size > 0 && !e.extents.is_empty())
+            .filter(|e| !e.is_dir && e.size > 0 && (!e.extents.is_empty() || e.resident.is_some()))
         {
             let sub = if e.deleted { "deleted" } else { "live" };
             let path = unique(out.join(sub).join(&e.path));
@@ -107,15 +107,28 @@ fn recover(image: &Path, out: &Path) -> Result<Vec<Entry>> {
     Ok(all)
 }
 
-/// Reads an entry's data; bytes past its valid size read as zeros (exFAT ValidDataLength).
+/// Reads an entry's data; holes (NTFS sparse runs) and bytes past its valid size read as
+/// zeros (exFAT ValidDataLength, NTFS initialized size).
 fn read_file(src: &ImageFile, e: &Entry) -> Result<Vec<u8>> {
+    if let Some(data) = &e.resident {
+        return Ok(data.clone());
+    }
     let mut data = Vec::new();
+    let mut holes = e.holes.iter().peekable();
+    let mut fill_holes = |data: &mut Vec<u8>| -> Result<()> {
+        while let Some(h) = holes.next_if(|h| h.file_offset <= data.len() as u64) {
+            data.resize(data.len() + usize::try_from(h.len)?, 0);
+        }
+        Ok(())
+    };
     for x in &e.extents {
+        fill_holes(&mut data)?;
         let start = data.len();
         data.resize(start + usize::try_from(x.len)?, 0);
         let got = src.read_at(x.offset, data.get_mut(start..).unwrap_or_default())?;
         data.truncate(start + got);
     }
+    fill_holes(&mut data)?;
     if let Ok(valid) = usize::try_from(e.valid_size)
         && let Some(tail) = data.get_mut(valid..)
     {
