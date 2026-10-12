@@ -16,6 +16,7 @@ pub mod mts;
 pub mod naive;
 pub mod pieces;
 pub mod png;
+pub mod raw;
 pub mod reader;
 pub mod scan;
 
@@ -36,6 +37,9 @@ pub struct Found {
     /// For videos: whether the index (`moov`) was found. A video without one usually has
     /// intact data that a rebuilt index can make playable again.
     pub has_index: Option<bool>,
+    /// False when part of the data could not be checked (a camera RAW's sensor data in a
+    /// vendor compression): `status` then says only that what was checked holds together.
+    pub verified: bool,
 }
 
 impl Found {
@@ -50,6 +54,7 @@ impl Found {
             width: None,
             height: None,
             has_index: None,
+            verified: true,
         }
     }
 
@@ -89,6 +94,17 @@ pub enum Kind {
     Mts,
     Avi,
     Png,
+    Tiff,
+    Cr2,
+    /// Canon's ISO BMFF raw format.
+    Cr3,
+    Nef,
+    Arw,
+    Dng,
+    Orf,
+    Rw2,
+    Pef,
+    Raf,
 }
 
 impl Kind {
@@ -101,6 +117,16 @@ impl Kind {
             Kind::Mts => "mts",
             Kind::Avi => "avi",
             Kind::Png => "png",
+            Kind::Tiff => "tif",
+            Kind::Cr2 => "cr2",
+            Kind::Cr3 => "cr3",
+            Kind::Nef => "nef",
+            Kind::Arw => "arw",
+            Kind::Dng => "dng",
+            Kind::Orf => "orf",
+            Kind::Rw2 => "rw2",
+            Kind::Pef => "pef",
+            Kind::Raf => "raf",
         }
     }
 }

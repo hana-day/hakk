@@ -53,6 +53,10 @@ pub enum FileKind {
     Nef,
     Arw,
     Dng,
+    Orf,
+    Rw2,
+    Pef,
+    Raf,
     Mp4,
     Mov,
     Avi,
@@ -61,7 +65,7 @@ pub enum FileKind {
 }
 
 impl FileKind {
-    const ALL: [FileKind; 17] = [
+    const ALL: [FileKind; 21] = [
         FileKind::Jpeg,
         FileKind::Png,
         FileKind::Gif,
@@ -74,6 +78,10 @@ impl FileKind {
         FileKind::Nef,
         FileKind::Arw,
         FileKind::Dng,
+        FileKind::Orf,
+        FileKind::Rw2,
+        FileKind::Pef,
+        FileKind::Raf,
         FileKind::Mp4,
         FileKind::Mov,
         FileKind::Avi,
@@ -100,6 +108,10 @@ impl FileKind {
             FileKind::Nef => "nef",
             FileKind::Arw => "arw",
             FileKind::Dng => "dng",
+            FileKind::Orf => "orf",
+            FileKind::Rw2 => "rw2",
+            FileKind::Pef => "pef",
+            FileKind::Raf => "raf",
             FileKind::Mp4 => "mp4",
             FileKind::Mov => "mov",
             FileKind::Avi => "avi",

@@ -116,8 +116,7 @@ impl Pieces {
             if n == 0 {
                 return None;
             }
-            let src = r.slice(self.physical(at), n)?;
-            buf.get_mut(done..done + n)?.copy_from_slice(src);
+            r.read_into(self.physical(at), buf.get_mut(done..done + n)?)?;
             done += n;
         }
         Some(())

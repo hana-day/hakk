@@ -12,6 +12,7 @@ mod mts;
 mod picture;
 mod png;
 pub mod profile;
+mod raw;
 
 use anyhow::{Result, bail};
 use serde::Serialize;
@@ -73,6 +74,12 @@ pub fn generate(
         (ContentKind::Avi, Some(name)) => bail!("avi files have no profiles yet ({name:?})"),
         (ContentKind::Png, None) => png::generate(target, rng),
         (ContentKind::Png, Some(name)) => bail!("png files have no profiles yet ({name:?})"),
+        (ContentKind::Cr2 | ContentKind::Nef | ContentKind::Arw | ContentKind::Dng, None) => {
+            raw::generate(kind, target, rng)
+        }
+        (ContentKind::Cr2 | ContentKind::Nef | ContentKind::Arw | ContentKind::Dng, Some(name)) => {
+            bail!("raw files have no profiles yet ({name:?})")
+        }
     }
 }
 
@@ -124,5 +131,9 @@ pub fn extension(kind: ContentKind) -> &'static str {
         ContentKind::Mts => "MTS",
         ContentKind::Avi => "AVI",
         ContentKind::Png => "PNG",
+        ContentKind::Cr2 => "CR2",
+        ContentKind::Nef => "NEF",
+        ContentKind::Arw => "ARW",
+        ContentKind::Dng => "DNG",
     }
 }

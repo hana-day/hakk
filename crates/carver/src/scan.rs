@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, avi, fragments, heif, jpeg, mp4, mts, png, reader::Reader};
+use crate::{Found, Kind, Status, avi, fragments, heif, jpeg, mp4, mts, png, raw, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -102,6 +102,7 @@ pub fn looks_like_header(head: &[u8]) -> bool {
         || head.get(4..8) == Some(b"ftyp")
         || avi::looks_like_avi(head)
         || png::looks_like_png(head)
+        || raw::looks_like_raw(head)
         || mts::looks_like_mts(head)
 }
 
@@ -176,6 +177,32 @@ pub fn carve_at<S: BlockSource + ?Sized>(
         }
         return Some(found);
     }
+    if r.slice(at, 16).is_some_and(raw::looks_like_raw) {
+        let x = raw::carve(r, at, opts.max_jpeg.max(256 << 20))?;
+        let status = match x.status {
+            raw::Status::Complete => Status::Complete,
+            raw::Status::Corrupt { at } => Status::Corrupt { at },
+            raw::Status::Truncated => Status::Truncated,
+        };
+        let kind = match x.kind {
+            raw::RawKind::Tiff => Kind::Tiff,
+            raw::RawKind::Cr2 => Kind::Cr2,
+            raw::RawKind::Nef => Kind::Nef,
+            raw::RawKind::Arw => Kind::Arw,
+            raw::RawKind::Dng => Kind::Dng,
+            raw::RawKind::Orf => Kind::Orf,
+            raw::RawKind::Rw2 => Kind::Rw2,
+            raw::RawKind::Pef => Kind::Pef,
+            raw::RawKind::Raf => Kind::Raf,
+        };
+        let mut found = Found::contiguous(at, x.len, kind, status);
+        found.verified = x.verified;
+        if x.width > 0 && x.height > 0 {
+            found.width = Some(x.width);
+            found.height = Some(x.height);
+        }
+        return Some(found);
+    }
     if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
         if in_avi_frame(r, at) {
             return None;
@@ -219,6 +246,8 @@ pub fn carve_at<S: BlockSource + ?Sized>(
         let m = mp4::carve(r, at, opts.max_video)?;
         let kind = if &m.brand == b"qt  " {
             Kind::Mov
+        } else if &m.brand == b"crx " {
+            Kind::Cr3
         } else {
             Kind::Mp4
         };
