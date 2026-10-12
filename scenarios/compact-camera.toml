@@ -1,0 +1,38 @@
+# Compact camera: a FAT32 SD card from a 2000s digital camera holding photos and Motion
+# JPEG movies (.AVI); some deleted, then more shot over the gaps (so some movies fragment).
+name = "compact-camera"
+seed = 13
+size = "256MiB"
+fs = "fat32"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "canon-compact"
+count = 12
+min_size = "1MiB"
+max_size = "3MiB"
+
+[[steps]]
+op = "write"
+kind = "avi"
+count = 6
+min_size = "4MiB"
+max_size = "12MiB"
+dir = "DCIM/100CANON"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+[[steps]]
+op = "write"
+kind = "avi"
+count = 4
+min_size = "8MiB"
+max_size = "16MiB"
+dir = "DCIM/101CANON"
+
+[[steps]]
+op = "delete"
+fraction = 0.4

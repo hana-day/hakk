@@ -71,6 +71,21 @@ impl<'a, S: BlockSource + ?Sized> Reader<'a, S> {
         self.src
     }
 
+    /// Fills `buf` from `pos`, however long it is (in window-sized steps). `None` if the
+    /// bytes are not all available.
+    pub fn read_into(&mut self, pos: u64, buf: &mut [u8]) -> Option<()> {
+        let step = self
+            .windows
+            .first()
+            .map_or(4096, |w| w.buf.len() / 2)
+            .max(1);
+        for (i, part) in buf.chunks_mut(step).enumerate() {
+            let at = pos.checked_add((i * step) as u64)?;
+            part.copy_from_slice(self.slice(at, part.len())?);
+        }
+        Some(())
+    }
+
     /// The byte at `pos`.
     pub fn byte(&mut self, pos: u64) -> Option<u8> {
         self.slice(pos, 1).and_then(|s| s.first().copied())

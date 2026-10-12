@@ -1324,6 +1324,7 @@ name = "hakk-scenario"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
  "image",
  "jpeg-encoder",
  "serde",
@@ -1629,6 +1630,7 @@ dependencies = [
  "byteorder-lite",
  "moxcms",
  "num-traits",
+ "png 0.18.1",
  "zune-core",
  "zune-jpeg",
 ]

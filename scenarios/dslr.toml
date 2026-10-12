@@ -1,0 +1,56 @@
+# DSLR / mirrorless: a photo folder on an exFAT disk with RAW files (Canon CR2, Nikon NEF,
+# Sony ARW) shot as RAW+JPEG, and phone DNGs; some deleted, then more copied over the
+# gaps (so some files fragment).
+name = "dslr"
+seed = 29
+size = "512MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "cr2"
+count = 4
+min_size = "18MiB"
+max_size = "28MiB"
+dir = "Photos/2026-09 Canon"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "canon-compact"
+count = 4
+min_size = "4MiB"
+max_size = "8MiB"
+dir = "Photos/2026-09 Canon"
+
+[[steps]]
+op = "write"
+kind = "nef"
+count = 3
+min_size = "15MiB"
+max_size = "25MiB"
+dir = "Photos/2026-09 Nikon"
+
+[[steps]]
+op = "write"
+kind = "arw"
+count = 3
+min_size = "20MiB"
+max_size = "30MiB"
+dir = "Photos/2026-10 Sony"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+[[steps]]
+op = "write"
+kind = "dng"
+count = 6
+min_size = "10MiB"
+max_size = "20MiB"
+dir = "Photos/Phone RAW"
+
+[[steps]]
+op = "delete"
+fraction = 0.4

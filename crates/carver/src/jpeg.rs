@@ -17,14 +17,40 @@ use crate::reader::Reader;
 /// A JPEG found at some offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Jpeg {
-    /// Bytes from SOI through EOI if complete; up to the failure point otherwise.
+    /// Bytes from SOI through EOI if complete (plus any appended parts, see `appended`);
+    /// up to the failure point otherwise.
     pub len: u64,
+    /// Bytes from SOI through the primary image's EOI.
+    pub primary_len: u64,
+    /// Parts stored after the primary image's EOI and included in `len`: a gain map
+    /// (Ultra HDR), a motion photo's video, MPF images.
+    pub appended: Vec<Appended>,
     pub status: Status,
     pub width: u16,
     pub height: u16,
     pub progressive: bool,
     /// Whether the entropy-coded data was fully Huffman-decoded (baseline only).
     pub verified: bool,
+}
+
+/// A part stored after the primary image, found through the file's own directory (XMP
+/// `Container:Directory` or MPF) and checked to start where the directory says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Appended {
+    pub kind: AppendedKind,
+    /// Offset from the start of the file.
+    pub offset: u64,
+    pub len: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendedKind {
+    /// Another JPEG (a gain map, a preview, an MPF image).
+    Image,
+    /// An MP4/QuickTime video (a motion photo).
+    Video,
+    /// Something else the directory lists.
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,14 +92,23 @@ pub(crate) fn carve_with_plan<S: BlockSource + ?Sized>(
         scans: 0,
         plan: None,
         quant: [[1; 64]; 4],
+        directory: Directory::default(),
     };
     let (end, status) = p.run();
     if p.segments == 0 {
         return None;
     }
     let (width, height) = p.frame.as_ref().map_or((0, 0), |f| (f.width, f.height));
+    let appended = if status == Status::Complete {
+        p.appended(end)
+    } else {
+        Vec::new()
+    };
+    let total_end = appended.last().map_or(end, |a| start + a.offset + a.len);
     let jpeg = Jpeg {
-        len: end - start,
+        len: total_end - start,
+        primary_len: end - start,
+        appended,
         status,
         width,
         height,
@@ -87,6 +122,31 @@ pub(crate) fn carve_with_plan<S: BlockSource + ?Sized>(
         None
     };
     Some((jpeg, plan))
+}
+
+/// One item of an XMP container directory.
+struct Item {
+    mime: String,
+    length: u64,
+    padding: u64,
+}
+
+/// What the header says follows the primary image.
+#[derive(Default)]
+struct Directory {
+    /// XMP `Container:Directory` items, the primary first.
+    items: Vec<Item>,
+    /// `GCamera:MicroVideoOffset`: the video's length at the end of the file.
+    micro_video: Option<u64>,
+    /// MPF entries: (absolute offset, size) of the other images.
+    mpf: Vec<(u64, u64)>,
+}
+
+/// The value of `name="..."` in an XML fragment.
+fn attribute(xml: &str, name: &str) -> Option<String> {
+    let at = xml.find(&format!("{name}=\""))? + name.len() + 2;
+    let rest = xml.get(at..)?;
+    Some(rest.get(..rest.find('"')?)?.to_owned())
 }
 
 struct Component {
@@ -178,6 +238,51 @@ impl Huffman {
 /// Huffman tables by class (0 = DC, 1 = AC) and id (0..=3).
 type Tables = [[Option<Huffman>; 4]; 2];
 
+/// The example tables of T.81 K.3 (Tables K.3 to K.6) as (BITS, HUFFVAL), by class and id:
+/// DC luminance, DC chrominance, AC luminance, AC chrominance. Motion JPEG frames (AVI1)
+/// leave out DHT and are decoded with these.
+fn standard_table(class: usize, id: usize) -> Option<Huffman> {
+    const DC_VALUES: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const DC_LUMA: [u8; 16] = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0];
+    const DC_CHROMA: [u8; 16] = [0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0];
+    const AC_LUMA: [u8; 16] = [0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7D];
+    const AC_LUMA_VALUES: [u8; 162] = [
+        0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61,
+        0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08, 0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52,
+        0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25,
+        0x26, 0x27, 0x28, 0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45,
+        0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63, 0x64,
+        0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x83,
+        0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99,
+        0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6,
+        0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xD2, 0xD3,
+        0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8,
+        0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
+    ];
+    const AC_CHROMA: [u8; 16] = [0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77];
+    const AC_CHROMA_VALUES: [u8; 162] = [
+        0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21, 0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61,
+        0x71, 0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91, 0xA1, 0xB1, 0xC1, 0x09, 0x23, 0x33,
+        0x52, 0xF0, 0x15, 0x62, 0x72, 0xD1, 0x0A, 0x16, 0x24, 0x34, 0xE1, 0x25, 0xF1, 0x17, 0x18,
+        0x19, 0x1A, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44,
+        0x45, 0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59, 0x5A, 0x63,
+        0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A,
+        0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97,
+        0x98, 0x99, 0x9A, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4,
+        0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA,
+        0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7,
+        0xE8, 0xE9, 0xEA, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA,
+    ];
+    let (bits, values): (&[u8; 16], &[u8]) = match (class, id) {
+        (0, 0) => (&DC_LUMA, &DC_VALUES),
+        (0, 1) => (&DC_CHROMA, &DC_VALUES),
+        (1, 0) => (&AC_LUMA, &AC_LUMA_VALUES),
+        (1, 1) => (&AC_CHROMA, &AC_CHROMA_VALUES),
+        _ => return None,
+    };
+    Huffman::new(bits, values.to_vec())
+}
+
 struct Parser<'r, 'a, S: BlockSource + ?Sized> {
     r: &'r mut Reader<'a, S>,
     start: u64,
@@ -196,6 +301,8 @@ struct Parser<'r, 'a, S: BlockSource + ?Sized> {
     plan: Option<Plan>,
     /// Quantization tables in zigzag order (to scale coefficients back).
     quant: [[i32; 64]; 4],
+    /// What the header says follows the primary image.
+    directory: Directory,
 }
 
 /// Why decoding stopped.
@@ -261,6 +368,8 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
                 self.sof(body).ok_or(Stop::Corrupt(pos))?;
             }
             0xDD => self.restart = self.r.u16_be(body).ok_or(Stop::Truncated)?,
+            0xE1 => self.xmp(body, len - 2),
+            0xE2 => self.mpf(body, len - 2),
             0xDA => return self.scan(body, next).map(Next::Continue),
             _ => {}
         }
@@ -281,6 +390,178 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
             at += 17 + n as u64;
         }
         (at == end).then_some(())
+    }
+
+    /// APP1: an XMP packet may carry a container directory (Google "Container" items, used
+    /// by Ultra HDR and motion photos) or an older motion photo's video offset.
+    ///
+    /// Reference: Android "Ultra HDR image format" and "Motion photo format" (XMP
+    /// `Container:Directory` with `Item:Semantic`, `Item:Length`, `Item:Padding`;
+    /// `GCamera:MicroVideoOffset`).
+    fn xmp(&mut self, body: u64, len: u64) {
+        const NS: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+        let Some(text) = usize::try_from(len)
+            .ok()
+            .and_then(|n| self.r.slice(body, n))
+        else {
+            return;
+        };
+        if !text.starts_with(NS) {
+            return;
+        }
+        let text = String::from_utf8_lossy(text).into_owned();
+        let mut items = Vec::new();
+        for element in text.split("<Container:Item").skip(1) {
+            let element = element.split('>').next().unwrap_or_default();
+            items.push(Item {
+                mime: attribute(element, "Item:Mime").unwrap_or_default(),
+                length: attribute(element, "Item:Length")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                padding: attribute(element, "Item:Padding")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            });
+        }
+        if !items.is_empty() {
+            self.directory.items = items;
+        }
+        if let Some(v) = attribute(&text, "GCamera:MicroVideoOffset").and_then(|v| v.parse().ok()) {
+            self.directory.micro_video = Some(v);
+        }
+    }
+
+    /// APP2: an MPF (Multi-Picture Format) index lists the other images in the file.
+    ///
+    /// Reference: CIPA DC-007 "Multi-Picture Format" 5.2 (MP Index IFD, MP Entry).
+    fn mpf(&mut self, body: u64, len: u64) {
+        let Some(head) = self.r.slice(body, 4) else {
+            return;
+        };
+        if head != b"MPF\0" || len < 16 {
+            return;
+        }
+        let tiff = body + 4;
+        let little = match self.r.slice(tiff, 2) {
+            Some(b"II") => true,
+            Some(b"MM") => false,
+            _ => return,
+        };
+        let Some(ifd) = self.u32_endian(tiff + 4, little).map(u64::from) else {
+            return;
+        };
+        let mut entries = Vec::new();
+        let Some(n) = self.u16_endian(tiff + ifd, little) else {
+            return;
+        };
+        for i in 0..u64::from(n.min(64)) {
+            let at = tiff + ifd + 2 + 12 * i;
+            if self.u16_endian(at, little) != Some(0xB002) {
+                continue;
+            }
+            let (Some(total), Some(off)) = (
+                self.u32_endian(at + 4, little),
+                self.u32_endian(at + 8, little),
+            ) else {
+                continue;
+            };
+            // MP Entry: attribute (4), size (4), offset (4), dependent entries (2 + 2).
+            for k in 0..u64::from(total / 16).min(16) {
+                let e = tiff + u64::from(off) + 16 * k;
+                if let (Some(size), Some(offset)) = (
+                    self.u32_endian(e + 4, little),
+                    self.u32_endian(e + 8, little),
+                ) && offset > 0
+                {
+                    entries.push((tiff + u64::from(offset), u64::from(size)));
+                }
+            }
+        }
+        if !entries.is_empty() {
+            self.directory.mpf = entries;
+        }
+    }
+
+    fn u16_endian(&mut self, at: u64, little: bool) -> Option<u16> {
+        let b: [u8; 2] = self.r.slice(at, 2)?.try_into().ok()?;
+        Some(if little {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    }
+
+    fn u32_endian(&mut self, at: u64, little: bool) -> Option<u32> {
+        let b: [u8; 4] = self.r.slice(at, 4)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    }
+
+    /// The parts after the primary image ending at `end`, as the header's directory
+    /// describes them, kept only if each starts with what it should and lies within reach.
+    fn appended(&mut self, end: u64) -> Vec<Appended> {
+        let start = self.start;
+        let mut out = Vec::new();
+        let items = std::mem::take(&mut self.directory.items);
+        if items.len() > 1 {
+            // Items after the primary follow it back to back; the primary's padding first.
+            let mut at = end + items.first().map_or(0, |i| i.padding);
+            for item in items.iter().skip(1) {
+                let kind = if item.mime.starts_with("video/") {
+                    AppendedKind::Video
+                } else if item.mime.starts_with("image/jpeg") {
+                    AppendedKind::Image
+                } else {
+                    AppendedKind::Other
+                };
+                if item.length == 0 || !self.starts_like(at, kind) {
+                    break;
+                }
+                out.push(Appended {
+                    kind,
+                    offset: at - start,
+                    len: item.length,
+                });
+                at += item.length + item.padding;
+            }
+        } else if let Some(len) = self.directory.micro_video {
+            // The video is the last `len` bytes of the file, right after the image.
+            if len > 0 && self.starts_like(end, AppendedKind::Video) {
+                out.push(Appended {
+                    kind: AppendedKind::Video,
+                    offset: end - start,
+                    len,
+                });
+            }
+        } else {
+            let mut entries = std::mem::take(&mut self.directory.mpf);
+            entries.sort_unstable();
+            for (at, len) in entries {
+                if at >= end && len > 0 && self.starts_like(at, AppendedKind::Image) {
+                    out.push(Appended {
+                        kind: AppendedKind::Image,
+                        offset: at - start,
+                        len,
+                    });
+                }
+            }
+        }
+        // Keep only parts that lie within reach.
+        let limit = self.limit.min(self.r.len());
+        out.retain(|a| start + a.offset + a.len <= limit);
+        out
+    }
+
+    /// Whether the bytes at `at` start a part of this kind.
+    fn starts_like(&mut self, at: u64, kind: AppendedKind) -> bool {
+        match kind {
+            AppendedKind::Image => self.r.slice(at, 3) == Some([0xFF, 0xD8, 0xFF].as_slice()),
+            AppendedKind::Video => self.r.slice(at + 4, 4) == Some(b"ftyp".as_slice()),
+            AppendedKind::Other => true,
+        }
     }
 
     /// DQT (B.2.4.1): keeps each table (in zigzag order).
@@ -357,6 +638,16 @@ impl<S: BlockSource + ?Sized> Parser<'_, '_, S> {
             return Err(corrupt);
         };
         // Per scan component: (blocks per MCU in x, in y, DC table, AC table).
+        // Tables the scan uses but no DHT defined: the standard ones (Motion JPEG).
+        for (_, td, ta) in &comps {
+            for (class, id) in [(0, *td), (1, *ta)] {
+                if let Some(slot) = self.tables.get_mut(class).and_then(|t| t.get_mut(id))
+                    && slot.is_none()
+                {
+                    *slot = standard_table(class, id);
+                }
+            }
+        }
         let mut layout = Vec::with_capacity(ns);
         for (cs, td, ta) in &comps {
             let c = frame
@@ -1011,6 +1302,53 @@ mod tests {
         j[n - 3] = 0xFF;
         j.insert(n - 2, 0xC8);
         assert!(matches!(run(j).unwrap().status, Status::Corrupt { .. }));
+    }
+
+    /// A JPEG whose XMP directory lists `parts` after it, followed by `tail`.
+    fn with_directory(parts: &[(&str, usize)], tail: &[u8]) -> Vec<u8> {
+        let mut xmp = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+        xmp.extend_from_slice(b"<Container:Directory><rdf:Seq>");
+        xmp.extend_from_slice(
+            b"<Container:Item Item:Mime=\"image/jpeg\" Item:Semantic=\"Primary\"/>",
+        );
+        for (mime, len) in parts {
+            xmp.extend_from_slice(
+                format!("<Container:Item Item:Mime=\"{mime}\" Item:Length=\"{len}\"/>").as_bytes(),
+            );
+        }
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        j.extend(u16::try_from(xmp.len() + 2).unwrap().to_be_bytes());
+        j.extend(xmp);
+        j.extend(&tiny()[2..]);
+        j.extend(tail);
+        j
+    }
+
+    #[test]
+    fn appended_parts_from_xmp_directory() {
+        let gain = tiny();
+        let mut video = 16u32.to_be_bytes().to_vec();
+        video.extend(b"ftypisom\0\0\0\0");
+        video.extend([0x55; 100]);
+        let parts = [("image/jpeg", gain.len()), ("video/mp4", video.len())];
+        let j = with_directory(&parts, &[gain.clone(), video.clone()].concat());
+        let got = run([j.clone(), vec![0xEE; 50]].concat()).unwrap();
+        assert_eq!(got.len, j.len() as u64);
+        assert_eq!(got.appended.len(), 2);
+        assert_eq!(got.appended[1].kind, AppendedKind::Video);
+        assert_eq!(got.primary_len, (j.len() - gain.len() - video.len()) as u64);
+    }
+
+    /// If the bytes after the image are not what the directory says (overwritten, or
+    /// fragmented elsewhere), only the image is kept.
+    #[test]
+    fn missing_appended_part_keeps_the_image() {
+        let parts = [("video/mp4", 116)];
+        let j = with_directory(&parts, &[0x11; 116]);
+        let got = run(j.clone()).unwrap();
+        assert_eq!(got.status, Status::Complete);
+        assert!(got.appended.is_empty());
+        assert_eq!(got.len, (j.len() - 116) as u64);
     }
 
     #[test]

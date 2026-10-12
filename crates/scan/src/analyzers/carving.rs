@@ -31,7 +31,7 @@ pub struct Carving {
 }
 
 /// Bytes needed at a sector start to recognize a header.
-const HEADER: usize = 8;
+const HEADER: usize = carver::scan::HEADER_LEN;
 
 impl Default for Carving {
     fn default() -> Self {
@@ -58,15 +58,11 @@ impl Carving {
             .contains(pos)
     }
 
-    fn claim(&self, file: &NewFile) {
-        if let [only] = file.extents.as_slice()
-            && file.status == Status::Recoverable
-        {
-            self.claimed
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .add(only.clone());
-        }
+    fn claim_span(&self, span: std::ops::Range<u64>) {
+        self.claimed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .add(span);
     }
 }
 
@@ -93,9 +89,13 @@ impl Analyzer for Carving {
             }
             let src = cx.source();
             let reader = parse.get_or_insert_with(|| Reader::new(src));
-            if let Some(file) = carve_at(reader, at, &self.opts).map(to_new_file) {
-                self.claim(&file);
-                cx.report(file);
+            if let Some(found) = carve_at(reader, at, &self.opts) {
+                // A transport stream repeats table headers throughout; once followed, its
+                // fragments are not searched again even if it is broken.
+                for &(off, len) in found.claimed() {
+                    self.claim_span(off..off.saturating_add(len));
+                }
+                cx.report(to_new_file(found));
             }
         }
     }
@@ -107,6 +107,20 @@ fn to_new_file(f: Found) -> NewFile {
         carver::Kind::Jpeg => FileKind::Jpeg,
         carver::Kind::Mp4 => FileKind::Mp4,
         carver::Kind::Mov => FileKind::Mov,
+        carver::Kind::Heic => FileKind::Heic,
+        carver::Kind::Mts => FileKind::Mts,
+        carver::Kind::Avi => FileKind::Avi,
+        carver::Kind::Png => FileKind::Png,
+        carver::Kind::Tiff => FileKind::Tiff,
+        carver::Kind::Cr2 => FileKind::Cr2,
+        carver::Kind::Cr3 => FileKind::Cr3,
+        carver::Kind::Nef => FileKind::Nef,
+        carver::Kind::Arw => FileKind::Arw,
+        carver::Kind::Dng => FileKind::Dng,
+        carver::Kind::Orf => FileKind::Orf,
+        carver::Kind::Rw2 => FileKind::Rw2,
+        carver::Kind::Pef => FileKind::Pef,
+        carver::Kind::Raf => FileKind::Raf,
     };
     let mut file = NewFile::carved(kind, f.offset, f.len);
     file.extents = f
@@ -115,6 +129,8 @@ fn to_new_file(f: Found) -> NewFile {
         .map(|&(off, len)| off..off.saturating_add(len))
         .collect();
     file.status = match f.status {
+        // Holds together as far as it could be checked, but part of it could not be.
+        carver::Status::Complete if !f.verified => Status::Unknown,
         carver::Status::Complete => Status::Recoverable,
         carver::Status::Corrupt { .. } => Status::Damaged,
         // A video whose `moov` is missing (e.g. the recording was interrupted): the data

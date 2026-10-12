@@ -4,7 +4,9 @@
 //!
 //! - **Target**: a deleted file whose content is fully intact (not overwritten). The
 //!   denominator of the recovery rate.
-//! - **Complete**: some recovered file has the same SHA-256.
+//! - **Complete**: some recovered file has the same SHA-256, or the same content once
+//!   trailing zero bytes are dropped from both (phones such as Samsung, LG and Wiko pad
+//!   JPEGs with zeros after EOI, and no carver can tell padding from free space).
 //! - **Partial**: no exact match, but some recovered file has 512-byte blocks matching at
 //!   the same offsets. The best fraction of the target's blocks matched is its "block ratio".
 //! - **Damaged**: a deleted file that was partly overwritten. Not in the denominator; only
@@ -183,6 +185,15 @@ impl Report {
             .enumerate()
             .map(|(i, f)| (f.sha256.as_str(), i))
             .collect();
+        // Content without trailing zeros, for files that end with zero padding.
+        let by_trimmed: HashMap<String, usize> = contents
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let c = c.as_ref()?;
+                (c.last() == Some(&0)).then(|| (hex(&Sha256::digest(trim_zeros(c))), i))
+            })
+            .collect();
 
         let mut complete_as: Vec<Option<String>> = vec![None; m.files.len()];
         let mut best_ratio = vec![0.0f64; m.files.len()];
@@ -197,7 +208,10 @@ impl Report {
                 .to_string_lossy()
                 .into_owned();
             let sha = hex(&Sha256::digest(&data));
-            if let Some(&fi) = by_hash.get(sha.as_str()) {
+            let matched = by_hash
+                .get(sha.as_str())
+                .or_else(|| by_trimmed.get(&hex(&Sha256::digest(trim_zeros(&data)))));
+            if let Some(&fi) = matched {
                 match complete_as.get_mut(fi) {
                     Some(slot @ None) => *slot = Some(rel),
                     Some(Some(_)) => duplicates += 1,
@@ -427,4 +441,10 @@ fn walk(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `data` without its trailing zero bytes.
+fn trim_zeros(data: &[u8]) -> &[u8] {
+    let end = data.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    data.get(..end).unwrap_or_default()
 }

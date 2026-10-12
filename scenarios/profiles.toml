@@ -2,7 +2,8 @@
 #
 # Only structure and sizes are recorded here (segment order, EXIF and thumbnail sizes,
 # trailers, box layout, chunking), never content. Sources: the NPS nps-2009-canon2 SD card
-# images (Digital Corpora) and the VISION dataset (University of Florence).
+# images (Digital Corpora), the VISION dataset (University of Florence), and files shot on
+# our own devices (iPad 7th gen, Pixel 8a).
 #
 
 # --- Photos ---------------------------------------------------------------
@@ -31,7 +32,7 @@ exif_len = [8190, 16382]
 thumbnail = [9000, 13500]
 
 # Samsung Galaxy S3 Mini: one segment per table, a restart marker every 8 rows of MCUs
-# (DRI right before SOS), and ~3.3 KB of data after EOI.
+# (DRI right before SOS), and ~3.3 KB of zeros after EOI.
 [jpeg.samsung-s3mini]
 make = "SAMSUNG"
 model = "GT-I8190N"
@@ -43,7 +44,7 @@ exif_len = [10500, 13800]
 thumbnail = [9000, 10000]
 trailer = [3354, 3356]
 
-# LG D290: merged tables and ~180 KB of data after EOI.
+# LG D290: merged tables and ~180 KB of zeros after EOI.
 [jpeg.lg]
 make = "LG Electronics"
 model = "LG-D290"
@@ -53,6 +54,54 @@ segments = ["exif", "dqt", "sof", "dht"]
 exif_len = [15200, 18800]
 thumbnail = [13000, 15000]
 trailer = [177000, 181000]
+
+# Pixel 8a, Ultra HDR: EXIF with a ~4 KB thumbnail, an ICC profile (APP2), XMP with a
+# container directory, extended XMP (~62 KB APP1), MPF (APP2), APP11, then DHT before DQT.
+# A ~43-52 KB gain map JPEG follows the image.
+[jpeg.pixel-ultrahdr]
+make = "Google"
+model = "Pixel 8a"
+dir = "DCIM/Camera"
+name = "PXL_2026{n}_120000000.jpg"
+aspect = [3, 4]
+segments = [
+    "exif",
+    { app = { n = 2, len = [612, 612] } },
+    "xmp",
+    { app = { n = 1, len = [63600, 63700] } },
+    { app = { n = 2, len = [88, 88] } },
+    { app = { n = 11, len = [4, 4] } },
+    "dht",
+    "dqt",
+    "sof",
+]
+exif_len = [5200, 5230]
+thumbnail = [3800, 4000]
+gain_map = [43000, 53000]
+
+# Pixel 8a, motion photo (.MP.jpg): the Ultra HDR photo, its gain map, then an MP4 video
+# of the moments around the shot, all listed in the XMP container directory.
+[jpeg.pixel-motion]
+make = "Google"
+model = "Pixel 8a"
+dir = "DCIM/Camera"
+name = "PXL_2026{n}_120000000.MP.jpg"
+aspect = [3, 4]
+segments = [
+    "exif",
+    { app = { n = 2, len = [612, 612] } },
+    "xmp",
+    { app = { n = 1, len = [63600, 63700] } },
+    { app = { n = 2, len = [88, 88] } },
+    { app = { n = 11, len = [4, 4] } },
+    "dht",
+    "dqt",
+    "sof",
+]
+exif_len = [5200, 5230]
+thumbnail = [3800, 4000]
+gain_map = [50000, 53000]
+motion = { profile = "pixel", size = [2500000, 3000000] }
 
 # Huawei P9 Lite: JFIF after EXIF, one segment per table, a large (~45 KB) thumbnail.
 [jpeg.huawei]
@@ -173,3 +222,31 @@ reserve = [810000, 810000]
 video_per_chunk = 1000000
 co64 = true
 trailing_uuid = [[68600, 68700], [400, 420]]
+
+# Pixel 8a (HEVC): ftyp isom, mdat, moov at the end; every sample is its own chunk, so
+# video, audio and a timed metadata track alternate frame by frame; 64-bit offsets.
+[video.pixel]
+dir = "DCIM/Camera"
+name = "PXL_2026{n}_120000000.mp4"
+brand = "isom"
+compatible = ["isom", "iso2", "mp41"]
+layout = "moov-last"
+video_per_chunk = 1
+audio_per_chunk = 1
+co64 = true
+metadata_tracks = 1
+
+# --- HEIC -------------------------------------------------------------------
+
+# iPad 7th gen (iPadOS 18): ftyp heic, meta (35 hidden 512x512 HEVC tiles, a grid as the
+# primary item with its descriptor in idat, a 320x240 HEVC thumbnail, EXIF), then mdat with
+# EXIF, thumbnail and tiles in that order.
+[heif.ipad]
+make = "Apple"
+model = "iPad (7th generation)"
+dir = "DCIM/100APPLE"
+name = "IMG_{n}.HEIC"
+aspect = [4, 3]
+tile = 512
+exif_len = [2100, 2200]
+thumbnail = [7000, 8000]

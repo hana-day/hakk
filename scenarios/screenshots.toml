@@ -1,0 +1,39 @@
+# Screenshots: a PC's exFAT data disk with PNG screenshots and saved images next to
+# photos; some deleted, then more written over the gaps (so some files fragment).
+name = "screenshots"
+seed = 19
+size = "256MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "png"
+count = 20
+min_size = "300KiB"
+max_size = "4MiB"
+dir = "Pictures/Screenshots"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "iphone"
+count = 10
+min_size = "1MiB"
+max_size = "3MiB"
+dir = "Pictures/Camera Roll"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+
+[[steps]]
+op = "write"
+kind = "png"
+count = 10
+min_size = "2MiB"
+max_size = "6MiB"
+dir = "Pictures/Saved"
+
+[[steps]]
+op = "delete"
+fraction = 0.4

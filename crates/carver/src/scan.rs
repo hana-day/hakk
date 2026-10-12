@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, fragments, jpeg, mp4, reader::Reader};
+use crate::{Found, Kind, Status, avi, fragments, heif, jpeg, mp4, mts, png, raw, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -16,7 +16,8 @@ pub struct Options {
     pub max_jpeg: u64,
     /// Longest video to follow.
     pub max_video: u64,
-    /// Search for the missing fragments of broken JPEGs (`None` to skip it).
+    /// Search for the missing fragments of broken JPEGs and transport streams (`None` to
+    /// skip it).
     pub reassemble: Option<fragments::Options>,
 }
 
@@ -41,6 +42,8 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
     let mut found = Vec::new();
     let mut pos = 0u64;
     let mut skip_until = 0u64;
+    // Later fragments of files found, which repeat table headers (transport streams).
+    let mut claimed: Vec<(u64, u64)> = Vec::new();
     while pos < src.len() {
         let Ok(n) = src.read_at(pos, &mut buf) else {
             // Unreadable: move on (bad ranges are retried by the scan pipeline, not here).
@@ -56,31 +59,70 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
             if at < skip_until {
                 continue;
             }
-            let head = data.get(off..off + 8).unwrap_or_default();
-            let hit = if looks_like_header(head) {
+            let head = data
+                .get(off..off + HEADER_LEN)
+                .or_else(|| data.get(off..))
+                .unwrap_or_default();
+            let hit = if looks_like_header(head)
+                && !claimed.iter().any(|&(o, l)| (o..o + l).contains(&at))
+            {
                 carve_at(&mut parse, at, opts)
             } else {
                 None
             };
             if let Some(f) = hit {
-                if f.status == Status::Complete && f.fragments.len() == 1 {
-                    skip_until = at + f.len;
+                if let Some(&(first, len)) = f.claimed().first()
+                    && first == at
+                {
+                    skip_until = at + len;
                 }
+                claimed.extend(f.claimed().iter().skip(1));
                 found.push(f);
             }
         }
         pos += n as u64;
     }
+    // A later fragment placed before its file's start was found as a file of its own.
+    let inner: Vec<(u64, u64)> = found
+        .iter()
+        .flat_map(|f| f.claimed().iter().skip(1).copied())
+        .collect();
+    found.retain(|f| !inner.iter().any(|&(o, l)| (o..o + l).contains(&f.offset)));
     found
 }
 
-/// Whether `head` (the first bytes of a sector) starts a file this crate can carve.
+/// Bytes from a sector start that [`looks_like_header`] wants (three 192-byte transport
+/// stream packets; other formats need only the first 8).
+pub const HEADER_LEN: usize = 3 * 192;
+
+/// Whether `head` (the first bytes of a sector, ideally [`HEADER_LEN`]) starts a file this
+/// crate can carve.
 pub fn looks_like_header(head: &[u8]) -> bool {
-    head.starts_with(&[0xFF, 0xD8, 0xFF]) || head.get(4..8) == Some(b"ftyp")
+    head.starts_with(&[0xFF, 0xD8, 0xFF])
+        || head.get(4..8) == Some(b"ftyp")
+        || avi::looks_like_avi(head)
+        || png::looks_like_png(head)
+        || raw::looks_like_raw(head)
+        || mts::looks_like_mts(head)
+}
+
+/// Whether the JPEG at `at` is a Motion JPEG frame: right after an AVI frame chunk header
+/// (`##dc` or `##db`) that holds it. Frames are part of a video, not photos.
+fn in_avi_frame<S: BlockSource + ?Sized>(r: &mut Reader<S>, at: u64) -> bool {
+    let Some(head) = at.checked_sub(8).and_then(|h| r.slice(h, 8)) else {
+        return false;
+    };
+    let [a, b, c, d, s0, s1, s2, s3] = <[u8; 8]>::try_from(head).unwrap_or_default();
+    a.is_ascii_hexdigit()
+        && b.is_ascii_hexdigit()
+        && c == b'd'
+        && (d == b'c' || d == b'b')
+        && u32::from_le_bytes([s0, s1, s2, s3]) > 2
 }
 
 /// Carves the file starting at `at`, if any: a JPEG (reassembled if fragmented and
-/// `opts.reassemble` is set) or an MP4/QuickTime file. This is what [`scan`] does at each
+/// `opts.reassemble` is set), a HEIC image, an MP4/QuickTime file or an AVCHD/BDAV
+/// transport stream. This is what [`scan`] does at each
 /// header it finds, for callers that drive the reading themselves.
 pub fn carve_at<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
@@ -88,7 +130,83 @@ pub fn carve_at<S: BlockSource + ?Sized>(
     opts: &Options,
 ) -> Option<Found> {
     let head = r.slice(at, 8)?.to_vec();
+    if r.slice(at, HEADER_LEN).is_some_and(mts::looks_like_mts) {
+        let m = mts::follow(r, at, opts.max_video, opts.reassemble.as_ref())?;
+        let status = match m.status {
+            mts::Status::Complete => Status::Complete,
+            mts::Status::Corrupt { at } => Status::Corrupt { at },
+            mts::Status::Truncated => Status::Truncated,
+        };
+        return Some(Found {
+            fragments: m.fragments,
+            ..Found::contiguous(at, m.len, Kind::Mts, status)
+        });
+    }
+    if avi::looks_like_avi(&head) || r.slice(at, 12).is_some_and(avi::looks_like_avi) {
+        let a = avi::follow(r, at, opts.max_video, opts.reassemble.as_ref())?;
+        let status = match a.status {
+            avi::Status::Complete => Status::Complete,
+            avi::Status::Corrupt { at } => Status::Corrupt { at },
+            avi::Status::Truncated => Status::Truncated,
+        };
+        let mut found = Found {
+            fragments: a.fragments,
+            ..Found::contiguous(at, a.len, Kind::Avi, status)
+        };
+        found.has_index = Some(a.has_index);
+        if a.width > 0 && a.height > 0 {
+            found.width = Some(a.width);
+            found.height = Some(a.height);
+        }
+        return Some(found);
+    }
+    if png::looks_like_png(&head) {
+        let p = png::follow(r, at, opts.max_jpeg, opts.reassemble.as_ref())?;
+        let status = match p.status {
+            png::Status::Complete => Status::Complete,
+            png::Status::Corrupt { at } => Status::Corrupt { at },
+            png::Status::Truncated => Status::Truncated,
+        };
+        let mut found = Found {
+            fragments: p.fragments,
+            ..Found::contiguous(at, p.len, Kind::Png, status)
+        };
+        if p.width > 0 && p.height > 0 {
+            found.width = Some(p.width);
+            found.height = Some(p.height);
+        }
+        return Some(found);
+    }
+    if r.slice(at, 16).is_some_and(raw::looks_like_raw) {
+        let x = raw::carve(r, at, opts.max_jpeg.max(256 << 20))?;
+        let status = match x.status {
+            raw::Status::Complete => Status::Complete,
+            raw::Status::Corrupt { at } => Status::Corrupt { at },
+            raw::Status::Truncated => Status::Truncated,
+        };
+        let kind = match x.kind {
+            raw::RawKind::Tiff => Kind::Tiff,
+            raw::RawKind::Cr2 => Kind::Cr2,
+            raw::RawKind::Nef => Kind::Nef,
+            raw::RawKind::Arw => Kind::Arw,
+            raw::RawKind::Dng => Kind::Dng,
+            raw::RawKind::Orf => Kind::Orf,
+            raw::RawKind::Rw2 => Kind::Rw2,
+            raw::RawKind::Pef => Kind::Pef,
+            raw::RawKind::Raf => Kind::Raf,
+        };
+        let mut found = Found::contiguous(at, x.len, kind, status);
+        found.verified = x.verified;
+        if x.width > 0 && x.height > 0 {
+            found.width = Some(x.width);
+            found.height = Some(x.height);
+        }
+        return Some(found);
+    }
     if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        if in_avi_frame(r, at) {
+            return None;
+        }
         let j = jpeg::carve(r, at, opts.max_jpeg)?;
         let status = match j.status {
             jpeg::Status::Complete => Status::Complete,
@@ -115,10 +233,21 @@ pub fn carve_at<S: BlockSource + ?Sized>(
         }
         return Some(found);
     }
+    if head.get(4..8) == Some(b"ftyp") && heif::is_heif(r, at).is_some() {
+        let h = heif::carve(r, at, opts.max_jpeg)?;
+        let status = match h.status {
+            heif::Status::Complete => Status::Complete,
+            heif::Status::Corrupt { at } => Status::Corrupt { at },
+            heif::Status::Truncated => Status::Truncated,
+        };
+        return Some(Found::contiguous(at, h.len, Kind::Heic, status));
+    }
     if head.get(4..8) == Some(b"ftyp") {
         let m = mp4::carve(r, at, opts.max_video)?;
         let kind = if &m.brand == b"qt  " {
             Kind::Mov
+        } else if &m.brand == b"crx " {
+            Kind::Cr3
         } else {
             Kind::Mp4
         };
