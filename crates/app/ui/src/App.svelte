@@ -20,10 +20,10 @@
     return () => void unlisten.then((stop) => stop());
   });
 
-  async function start(drive: Drive) {
+  async function start(drive: Drive, fresh: boolean) {
     early = [];
     try {
-      const scanId = await api.startScan(drive.id);
+      const scanId = await api.startScan(drive.id, fresh);
       const next = new ScanSession(drive, scanId);
       for (const event of early) next.handle(event);
       session = next;

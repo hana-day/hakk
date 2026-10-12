@@ -121,8 +121,9 @@ fn scans_an_image_and_recovers_what_it_found() {
         .unwrap();
     assert_eq!(drive.capacity_bytes, IMAGE_LEN as u64);
     assert_eq!(h.helper.list_drives().unwrap(), vec![drive.clone()]);
+    assert_eq!(drive.saved_scan, None);
 
-    let scan_id = h.helper.start_scan(&drive.id).unwrap();
+    let scan_id = h.helper.start_scan(&drive.id, true).unwrap();
     let events = until(&h.events, |e| matches!(e, HelperEvent::ScanFinished(_)));
 
     let found: Vec<_> = events
@@ -175,18 +176,62 @@ fn scans_an_image_and_recovers_what_it_found() {
     }
 }
 
+/// The files and the offsets found in `events`.
+fn found_offsets(events: &[HelperEvent]) -> Vec<u64> {
+    let mut offsets: Vec<u64> = events
+        .iter()
+        .flat_map(|e| match e {
+            HelperEvent::FilesFound(f) => f.files.clone(),
+            _ => Vec::new(),
+        })
+        .filter_map(|f| f.offset)
+        .collect();
+    offsets.sort_unstable();
+    offsets
+}
+
+#[test]
+fn a_finished_scan_is_saved_and_opened_again() {
+    let h = harness();
+    let drive = h
+        .helper
+        .open_image(&h.image_path.to_string_lossy())
+        .unwrap();
+    assert_eq!(drive.saved_scan, None);
+    h.helper.start_scan(&drive.id, true).unwrap();
+    until(&h.events, |e| matches!(e, HelperEvent::ScanFinished(_)));
+
+    // The drive now shows its saved scan.
+    let listed = h.helper.list_drives().unwrap();
+    let saved = listed[0].saved_scan.clone().expect("saved scan");
+    assert!(saved.complete);
+    assert_eq!(saved.percent_done, 100);
+    assert_eq!(saved.files_found, 2);
+
+    // Continuing it reports the same files again without finding them twice.
+    h.helper.start_scan(&drive.id, false).unwrap();
+    let events = until(&h.events, |e| matches!(e, HelperEvent::ScanFinished(_)));
+    assert_eq!(found_offsets(&events), JPEG_AT.map(|a| a as u64));
+    assert_eq!(h.helper.list_drives().unwrap()[0].saved_scan, Some(saved));
+
+    // Starting afresh forgets it.
+    h.helper.start_scan(&drive.id, true).unwrap();
+    let events = until(&h.events, |e| matches!(e, HelperEvent::ScanFinished(_)));
+    assert_eq!(found_offsets(&events), JPEG_AT.map(|a| a as u64));
+}
+
 #[test]
 fn refuses_unknown_drives_and_destinations() {
     let h = harness();
     assert_eq!(
-        h.helper.start_scan(&DriveId("nope".into())),
+        h.helper.start_scan(&DriveId("nope".into()), true),
         Err(HelperError::DriveNotFound)
     );
     let drive = h
         .helper
         .open_image(&h.image_path.to_string_lossy())
         .unwrap();
-    let scan_id = h.helper.start_scan(&drive.id).unwrap();
+    let scan_id = h.helper.start_scan(&drive.id, true).unwrap();
     let err = h.helper.recover(RecoveryRequest {
         scan_id,
         files: vec![hakk_protocol::FileId(1)],
@@ -236,7 +281,7 @@ fn recovers_a_scenario_image() {
     let drive = helper
         .open_image(&dir.join("image.img").to_string_lossy())
         .unwrap();
-    let scan_id = helper.start_scan(&drive.id).unwrap();
+    let scan_id = helper.start_scan(&drive.id, true).unwrap();
     let seen = until(&events, |e| matches!(e, HelperEvent::ScanFinished(_)));
     let mut shown = HashMap::new();
     for e in &seen {

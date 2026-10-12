@@ -48,8 +48,13 @@ type Waiting = Mutex<HashMap<u64, Sender<Result<Answer, HelperError>>>>;
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Runs the helper: connects to the GUI's socket and serves it until it closes.
-/// `owner` (user id, group id) receives the recovered files.
-pub fn serve(socket: &Path, owner: Option<(u32, u32)>) -> io::Result<()> {
+/// `owner` (user id, group id) receives the recovered files and saved scans, which go in
+/// `data_dir` (the GUI's user's folder; root's own folder otherwise).
+pub fn serve(
+    socket: &Path,
+    owner: Option<(u32, u32)>,
+    data_dir: Option<PathBuf>,
+) -> io::Result<()> {
     let stream = UnixStream::connect(socket)?;
     let writer = Arc::new(Mutex::new(stream.try_clone()?));
     let events = writer.clone();
@@ -58,6 +63,9 @@ pub fn serve(socket: &Path, owner: Option<(u32, u32)>) -> io::Result<()> {
     });
     let mut helper = RealHelper::new(sink);
     helper.set_owner(owner);
+    if let Some(dir) = data_dir {
+        helper.set_data_dir(dir);
+    }
     for line in BufReader::new(stream).lines() {
         let line = line?;
         let request: Request = match serde_json::from_str(&line) {
@@ -84,7 +92,7 @@ fn dispatch(h: &RealHelper, call: Call) -> Result<Answer, HelperError> {
         Call::ListDrives => Answer::Drives(h.list_drives()?),
         Call::OpenImage { path } => Answer::Drive(h.open_image(&path)?),
         Call::ListDestinations { source } => Answer::Destinations(h.list_destinations(&source)?),
-        Call::StartScan { drive } => Answer::Scan(h.start_scan(&drive)?),
+        Call::StartScan { drive, fresh } => Answer::Scan(h.start_scan(&drive, fresh)?),
         Call::PauseScan { scan } => h.pause_scan(scan).map(|()| Answer::Done)?,
         Call::ResumeScan { scan } => h.resume_scan(scan).map(|()| Answer::Done)?,
         Call::CancelScan { scan } => h.cancel_scan(scan).map(|()| Answer::Done)?,
@@ -128,9 +136,10 @@ impl RemoteHelper {
         // SAFETY: getuid and getgid cannot fail and have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
         let command = format!(
-            "{} {SERVE_ARG} {} --owner {uid}:{gid} >/dev/null 2>&1 &",
+            "{} {SERVE_ARG} {} --owner {uid}:{gid} --data-dir {} >/dev/null 2>&1 &",
             shell_quote(&exe.to_string_lossy()),
             shell_quote(&socket.to_string_lossy()),
+            shell_quote(&crate::default_data_dir().to_string_lossy()),
         );
         let script = format!(
             "do shell script \"{}\" with prompt \"{}\" with administrator privileges",
@@ -268,9 +277,10 @@ impl Helper for RemoteHelper {
         }
     }
 
-    fn start_scan(&self, drive: &DriveId) -> Result<ScanId, HelperError> {
+    fn start_scan(&self, drive: &DriveId, fresh: bool) -> Result<ScanId, HelperError> {
         match self.call(Call::StartScan {
             drive: drive.clone(),
+            fresh,
         })? {
             Answer::Scan(s) => Ok(s),
             other => Err(wrong(other)),
@@ -323,6 +333,10 @@ mod tests {
 
     use super::*;
 
+    fn dir_data() -> PathBuf {
+        std::env::temp_dir().join(format!("hakk-test-{}", std::process::id()))
+    }
+
     #[test]
     fn quoting() {
         assert_eq!(shell_quote("/a b/it's"), r"'/a b/it'\''s'");
@@ -342,7 +356,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = {
             let socket = socket.clone();
-            thread::spawn(move || serve(&socket, None))
+            thread::spawn(move || serve(&socket, None, Some(dir_data())))
         };
         let (stream, _) = listener.accept().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -366,7 +380,7 @@ mod tests {
         assert_eq!(drive.capacity_bytes, 1 << 20);
         assert!(client.list_drives().unwrap().contains(&drive));
         assert!(matches!(
-            client.start_scan(&DriveId("nope".into())),
+            client.start_scan(&DriveId("nope".into()), false),
             Err(HelperError::DriveNotFound)
         ));
         drop(client);

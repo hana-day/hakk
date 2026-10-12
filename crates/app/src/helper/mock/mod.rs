@@ -101,7 +101,7 @@ impl Helper for MockHelper {
         self.with(|s| Ok(dataset::destinations(s.drive(source)?.device)))
     }
 
-    fn start_scan(&self, drive: &DriveId) -> Result<ScanId, HelperError> {
+    fn start_scan(&self, drive: &DriveId, _fresh: bool) -> Result<ScanId, HelperError> {
         self.with(|s| s.start_scan(drive))
     }
 

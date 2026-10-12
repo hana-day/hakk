@@ -110,7 +110,7 @@ pub(crate) fn run(
 
 /// Gives `dir` and everything in it to the user `uid` (group `gid`).
 #[cfg(unix)]
-fn hand_over(dir: &Path, uid: u32, gid: u32) {
+pub(crate) fn hand_over(dir: &Path, uid: u32, gid: u32) {
     let _ = std::os::unix::fs::lchown(dir, Some(uid), Some(gid));
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -126,7 +126,7 @@ fn hand_over(dir: &Path, uid: u32, gid: u32) {
 }
 
 #[cfg(not(unix))]
-fn hand_over(_dir: &Path, _uid: u32, _gid: u32) {}
+pub(crate) fn hand_over(_dir: &Path, _uid: u32, _gid: u32) {}
 
 fn count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)

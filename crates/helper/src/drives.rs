@@ -19,6 +19,9 @@ pub(crate) struct PhysicalDrive {
     pub device: PathBuf,
     /// The whole-disk identifier, e.g. `disk4`.
     pub disk: String,
+    /// Stays the same when the drive is plugged in again (unlike `disk`): model, size and
+    /// the partitions' UUIDs. Names the drive's saved scan.
+    pub identity: String,
 }
 
 /// Prefix of the ids of physical drives.
@@ -87,6 +90,7 @@ fn drive(
         capacity_bytes: size,
         file_system,
         warnings,
+        saved_scan: None,
     }
 }
 
@@ -175,11 +179,35 @@ mod mac {
                 format!("{model} ({})", volumes.join(", "))
             };
             let file_system = mine.iter().find_map(|p| p.2.clone());
+            let identity = format!(
+                "disk|{}|{size}|{}",
+                string(&info, "MediaName").unwrap_or_default().trim(),
+                uuids(&listing, &disk).join(",")
+            );
             out.push(PhysicalDrive {
+                identity,
                 drive: drive(&disk, name, size, k, file_system),
                 device: format!("/dev/r{disk}").into(),
                 disk,
             });
+        }
+        out
+    }
+
+    /// The partitions' UUIDs on each whole disk (GPT partition GUIDs, or volume UUIDs).
+    fn uuids(listing: &Dictionary, disk: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let disks = listing
+            .get("AllDisksAndPartitions")
+            .and_then(Value::as_array);
+        for d in disks.into_iter().flatten().filter_map(Value::as_dictionary) {
+            if string(d, "DeviceIdentifier").as_deref() != Some(disk) {
+                continue;
+            }
+            let parts = d.get("Partitions").and_then(Value::as_array);
+            for p in parts.into_iter().flatten().filter_map(Value::as_dictionary) {
+                out.extend(string(p, "DiskUUID").or_else(|| string(p, "VolumeUUID")));
+            }
         }
         out
     }

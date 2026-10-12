@@ -18,7 +18,8 @@ export const api = {
   listDrives: () => invoke<Drive[]>('list_drives'),
   openImage: (path: string) => invoke<Drive>('open_image', { path }),
   listDestinations: (source: DriveId) => invoke<Destination[]>('list_destinations', { source }),
-  startScan: (drive: DriveId) => invoke<ScanId>('start_scan', { drive }),
+  /** Unless `fresh`, continues the drive's saved scan (see `Drive.savedScan`). */
+  startScan: (drive: DriveId, fresh: boolean) => invoke<ScanId>('start_scan', { drive, fresh }),
   pauseScan: (scan: ScanId) => invoke<null>('pause_scan', { scan }),
   resumeScan: (scan: ScanId) => invoke<null>('resume_scan', { scan }),
   cancelScan: (scan: ScanId) => invoke<null>('cancel_scan', { scan }),

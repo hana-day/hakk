@@ -176,9 +176,7 @@
         {/if}
         <button type="button" class="btn-quiet" onclick={() => (confirming = 'cancel')}>{t('header.cancel')}</button>
       {:else}
-        <button type="button" class="btn-secondary" onclick={() => showToast(t('common.notAvailable'))}>
-          {t('header.saveResults')}
-        </button>
+        <span class="saved-note">{t('header.saved')}</span>
       {/if}
     </div>
   </header>
@@ -301,6 +299,7 @@
 </Dialog>
 
 <style>
+  .saved-note { font-size: 13px; color: var(--text-3); }
   /* Header, progress and footer stay put; only the sidebar and the results scroll. */
   .page { height: 100vh; display: flex; flex-direction: column; }
   header {

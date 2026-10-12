@@ -76,6 +76,22 @@ pub struct Drive {
     /// File system name as commonly written, e.g. `exFAT`. `None` if unrecognized.
     pub file_system: Option<String>,
     pub warnings: Vec<DriveWarning>,
+    /// A scan of this drive saved earlier, which can be continued (or, if complete, opened
+    /// without reading the drive again).
+    pub saved_scan: Option<SavedScan>,
+}
+
+/// What a saved scan of a drive got to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedScan {
+    /// Share of the planned data read, in percent (0-100).
+    pub percent_done: u8,
+    /// Files found (photos and videos, duplicates merged).
+    #[ts(type = "number")]
+    pub files_found: u64,
+    /// Read to the end (bad ranges may remain).
+    pub complete: bool,
 }
 
 /// Why a destination cannot be chosen.
@@ -489,8 +505,9 @@ pub trait Helper: Send + Sync {
     /// the same device as `source` are listed, but blocked.
     fn list_destinations(&self, source: &DriveId) -> Result<Vec<Destination>, HelperError>;
 
-    /// Starts a scan. Any previous scan is cancelled.
-    fn start_scan(&self, drive: &DriveId) -> Result<ScanId, HelperError>;
+    /// Starts a scan. Any previous scan is cancelled. Unless `fresh`, a saved scan of the
+    /// drive is continued: its files are reported again and only the rest is read.
+    fn start_scan(&self, drive: &DriveId, fresh: bool) -> Result<ScanId, HelperError>;
 
     fn pause_scan(&self, scan: ScanId) -> Result<(), HelperError>;
 
@@ -524,7 +541,7 @@ pub mod wire {
         ListDrives,
         OpenImage { path: String },
         ListDestinations { source: DriveId },
-        StartScan { drive: DriveId },
+        StartScan { drive: DriveId, fresh: bool },
         PauseScan { scan: ScanId },
         ResumeScan { scan: ScanId },
         CancelScan { scan: ScanId },

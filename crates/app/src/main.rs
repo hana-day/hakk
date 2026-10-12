@@ -82,8 +82,8 @@ fn elevated(_sink: &dyn Fn() -> EventSink, _mode: &str) -> Option<Box<dyn Helper
     None
 }
 
-/// `hakk --serve-helper SOCKET [--owner UID:GID]`: run as the elevated helper instead of
-/// the GUI. Returns whether it did.
+/// `hakk --serve-helper SOCKET [--owner UID:GID] [--data-dir DIR]`: run as the elevated
+/// helper instead of the GUI. Returns whether it did.
 #[cfg(unix)]
 fn serve_helper() -> bool {
     let args: Vec<String> = std::env::args().collect();
@@ -97,12 +97,14 @@ fn serve_helper() -> bool {
         eprintln!("{} needs a socket path", hakk_helper::remote::SERVE_ARG);
         std::process::exit(2);
     };
-    let owner = args
-        .iter()
-        .position(|a| a == "--owner")
-        .and_then(|j| args.get(j + 1))
-        .and_then(|o| hakk_helper::remote::parse_owner(o));
-    if let Err(err) = hakk_helper::remote::serve(std::path::Path::new(socket), owner) {
+    let value = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|j| args.get(j + 1))
+    };
+    let owner = value("--owner").and_then(|o| hakk_helper::remote::parse_owner(o));
+    let data_dir = value("--data-dir").map(std::path::PathBuf::from);
+    if let Err(err) = hakk_helper::remote::serve(std::path::Path::new(socket), owner, data_dir) {
         eprintln!("helper: {err}");
         std::process::exit(1);
     }

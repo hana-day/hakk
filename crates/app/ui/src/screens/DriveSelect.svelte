@@ -3,13 +3,13 @@
   import { api } from '../lib/api';
   import type { Drive } from '../lib/bindings/Drive';
   import { driveIcon, errorText } from '../lib/display';
-  import { formatBytes } from '../lib/format';
+  import { formatBytes, formatCount } from '../lib/format';
   import { t } from '../lib/i18n';
   import { showToast } from '../lib/toast.svelte';
   import Icon from '../components/Icon.svelte';
   import Logo from '../components/Logo.svelte';
 
-  let { onstart }: { onstart: (drive: Drive) => Promise<void> } = $props();
+  let { onstart }: { onstart: (drive: Drive, fresh: boolean) => Promise<void> } = $props();
 
   let drives = $state<Drive[] | null>(null);
   let failed = $state(false);
@@ -47,11 +47,11 @@
     }
   }
 
-  async function start() {
+  async function start(fresh: boolean) {
     if (!picked) return;
     starting = true;
     try {
-      await onstart(picked);
+      await onstart(picked, fresh);
     } catch (err) {
       showToast(errorText(err), 'error');
       starting = false;
@@ -114,6 +114,17 @@
                 <span class="sub">{t(`driveKind.${d.kind}`)}</span>
               </span>
               {#if d.fileSystem}<span class="sub">{d.fileSystem}</span>{/if}
+              {#if d.savedScan}
+                <span class="saved">
+                  <Icon name="info" size={14} stroke={2.2} />
+                  {d.savedScan.complete
+                    ? t('driveSelect.savedComplete', { files: formatCount(d.savedScan.filesFound) })
+                    : t('driveSelect.savedPartial', {
+                        percent: d.savedScan.percentDone,
+                        files: formatCount(d.savedScan.filesFound),
+                      })}
+                </span>
+              {/if}
               {#each d.warnings as w (w)}
                 <span class="warn"><Icon name="warn" size={14} stroke={2.2} />{t(`driveWarning.${w}`)}</span>
               {/each}
@@ -128,10 +139,22 @@
 
       <div class="bottom">
         <span class="hint"><Icon name="info" />{t('driveSelect.doNotSave')}</span>
-        <button type="button" class="btn-primary" disabled={!picked || starting} onclick={start}>
-          <Icon name="search" size={18} stroke={2.2} />
-          {t('driveSelect.start')}
-        </button>
+        <span class="actions">
+          {#if picked?.savedScan}
+            <button type="button" class="btn-secondary" disabled={starting} onclick={() => start(true)}>
+              {t('driveSelect.restart')}
+            </button>
+            <button type="button" class="btn-primary" disabled={starting} onclick={() => start(false)}>
+              <Icon name="search" size={18} stroke={2.2} />
+              {picked.savedScan.complete ? t('driveSelect.openResults') : t('driveSelect.continue')}
+            </button>
+          {:else}
+            <button type="button" class="btn-primary" disabled={!picked || starting} onclick={() => start(true)}>
+              <Icon name="search" size={18} stroke={2.2} />
+              {t('driveSelect.start')}
+            </button>
+          {/if}
+        </span>
       </div>
     {/if}
   </main>
@@ -205,6 +228,8 @@
   .title { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; }
   .name { font-size: 17px; font-weight: 700; }
   .sub { font-size: 13px; color: var(--text-3); }
+  .saved { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--brand); }
+  .actions { display: inline-flex; flex-wrap: wrap; gap: 12px; }
   .warn { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 13px; color: var(--warn); }
   .side { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   .size { font-size: 14px; }

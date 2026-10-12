@@ -31,8 +31,12 @@ pub fn list_destinations(
 }
 
 #[tauri::command(async)]
-pub fn start_scan(helper: State<'_, HelperState>, drive: DriveId) -> Result<ScanId, HelperError> {
-    helper.0.start_scan(&drive)
+pub fn start_scan(
+    helper: State<'_, HelperState>,
+    drive: DriveId,
+    fresh: bool,
+) -> Result<ScanId, HelperError> {
+    helper.0.start_scan(&drive, fresh)
 }
 
 #[tauri::command(async)]

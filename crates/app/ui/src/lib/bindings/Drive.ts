@@ -2,6 +2,7 @@
 import type { DriveId } from "./DriveId";
 import type { DriveKind } from "./DriveKind";
 import type { DriveWarning } from "./DriveWarning";
+import type { SavedScan } from "./SavedScan";
 
 /**
  * A drive that can be scanned.
@@ -14,4 +15,9 @@ name: string, capacityBytes: number,
 /**
  * File system name as commonly written, e.g. `exFAT`. `None` if unrecognized.
  */
-fileSystem: string | null, warnings: Array<DriveWarning>, };
+fileSystem: string | null, warnings: Array<DriveWarning>, 
+/**
+ * A scan of this drive saved earlier, which can be continued (or, if complete, opened
+ * without reading the drive again).
+ */
+savedScan: SavedScan | null, };
