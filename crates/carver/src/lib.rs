@@ -1,7 +1,8 @@
 //! Carving: finding and extracting files from raw data without the file system.
 //!
 //! - [`scan`]: walks a whole source and finds JPEG and MP4/QuickTime files
-//! - [`jpeg`], [`mp4`], [`heif`]: structure-aware carvers for one file at a known offset
+//! - [`jpeg`], [`mp4`], [`heif`], [`mts`]: structure-aware carvers for one file at a known
+//!   offset
 //! - [`fragments`]: reassembles fragmented JPEGs by resuming the decoder elsewhere
 //! - [`naive`]: the minimal baseline (SOI to the first EOI), kept for comparison
 //! - [`reader`]: a windowed reader over a [`blocksource::BlockSource`]
@@ -10,6 +11,7 @@ pub mod fragments;
 pub mod heif;
 pub mod jpeg;
 pub mod mp4;
+pub mod mts;
 pub mod naive;
 pub mod reader;
 pub mod scan;
@@ -48,6 +50,13 @@ impl Found {
         }
     }
 
+    /// Whether the span `offset..offset + len` belongs to this file, so a scan need not look
+    /// for other files' headers inside it: a complete contiguous file, or a transport
+    /// stream (whose packets repeat table headers throughout, broken or not).
+    pub fn covers_its_span(&self) -> bool {
+        self.fragments.len() == 1 && (self.status == Status::Complete || self.kind == Kind::Mts)
+    }
+
     /// Reads the file's bytes, joining its fragments.
     pub fn read<S: blocksource::BlockSource + ?Sized>(&self, src: &S) -> Vec<u8> {
         let mut out = Vec::new();
@@ -67,6 +76,8 @@ pub enum Kind {
     Mp4,
     Mov,
     Heic,
+    /// An AVCHD/BDAV transport stream (`.mts`/`.m2ts`).
+    Mts,
 }
 
 impl Kind {
@@ -76,6 +87,7 @@ impl Kind {
             Kind::Mp4 => "mp4",
             Kind::Mov => "mov",
             Kind::Heic => "heic",
+            Kind::Mts => "mts",
         }
     }
 }

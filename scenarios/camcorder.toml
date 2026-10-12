@@ -1,0 +1,38 @@
+# Camcorder: an SD card from an AVCHD camcorder (exFAT): clips and stills, a few clips
+# deleted, then more clips filling the gaps (so some of them fragment).
+name = "camcorder"
+seed = 7
+size = "512MiB"
+fs = "exfat"
+
+[[steps]]
+op = "write"
+kind = "mts"
+count = 8
+min_size = "20MiB"
+max_size = "40MiB"
+
+[[steps]]
+op = "write"
+kind = "jpeg"
+profile = "canon-compact"
+count = 10
+min_size = "1MiB"
+max_size = "3MiB"
+dir = "DCIM/100CANON"
+
+[[steps]]
+op = "delete"
+fraction = 0.5
+dir = "PRIVATE/AVCHD/BDMV/STREAM"
+
+[[steps]]
+op = "write"
+kind = "mts"
+count = 3
+min_size = "30MiB"
+max_size = "50MiB"
+
+[[steps]]
+op = "delete"
+fraction = 0.3

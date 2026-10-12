@@ -31,7 +31,7 @@ pub struct Carving {
 }
 
 /// Bytes needed at a sector start to recognize a header.
-const HEADER: usize = 8;
+const HEADER: usize = carver::scan::HEADER_LEN;
 
 impl Default for Carving {
     fn default() -> Self {
@@ -56,6 +56,13 @@ impl Carving {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(pos)
+    }
+
+    fn claim_span(&self, span: std::ops::Range<u64>) {
+        self.claimed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .add(span);
     }
 
     fn claim(&self, file: &NewFile) {
@@ -93,7 +100,13 @@ impl Analyzer for Carving {
             }
             let src = cx.source();
             let reader = parse.get_or_insert_with(|| Reader::new(src));
-            if let Some(file) = carve_at(reader, at, &self.opts).map(to_new_file) {
+            if let Some(found) = carve_at(reader, at, &self.opts) {
+                // A transport stream repeats table headers throughout; once followed, the
+                // rest of its span is not searched again even if it is broken.
+                if found.covers_its_span() && found.status != carver::Status::Complete {
+                    self.claim_span(found.offset..found.offset.saturating_add(found.len));
+                }
+                let file = to_new_file(found);
                 self.claim(&file);
                 cx.report(file);
             }
@@ -108,6 +121,7 @@ fn to_new_file(f: Found) -> NewFile {
         carver::Kind::Mp4 => FileKind::Mp4,
         carver::Kind::Mov => FileKind::Mov,
         carver::Kind::Heic => FileKind::Heic,
+        carver::Kind::Mts => FileKind::Mts,
     };
     let mut file = NewFile::carved(kind, f.offset, f.len);
     file.extents = f

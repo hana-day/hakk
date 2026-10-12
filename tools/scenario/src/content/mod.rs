@@ -7,6 +7,7 @@ mod exif;
 mod heif;
 mod jpeg;
 pub(crate) mod mp4;
+mod mts;
 mod picture;
 pub mod profile;
 
@@ -64,6 +65,8 @@ pub fn generate(
             None => bail!("no heif profile named {name:?}"),
         },
         (ContentKind::Heic, None) => bail!("heic files need a heif profile"),
+        (ContentKind::Mts, None) => Ok(mts::generate(target, rng)),
+        (ContentKind::Mts, Some(name)) => bail!("mts files have no profiles yet ({name:?})"),
     }
 }
 
@@ -94,10 +97,15 @@ pub fn path(
             .unzip(),
         _ => (None, None),
     };
-    let dir = dir.or(pdir).unwrap_or("DCIM/100HAKK");
+    // Camcorders keep AVCHD streams in their own tree, numbered 00001.MTS onwards.
+    let (default_dir, default_name) = match kind {
+        ContentKind::Mts => ("PRIVATE/AVCHD/BDMV/STREAM", format!("{n:05}.MTS")),
+        _ => ("DCIM/100HAKK", format!("IMG_{n:04}.{}", extension(kind))),
+    };
+    let dir = dir.or(pdir).unwrap_or(default_dir);
     let name = match template {
         Some(t) => profile::file_name(t, n),
-        None => format!("IMG_{n:04}.{}", extension(kind)),
+        None => default_name,
     };
     format!("{dir}/{name}")
 }
@@ -107,5 +115,6 @@ pub fn extension(kind: ContentKind) -> &'static str {
         ContentKind::Jpeg => "JPG",
         ContentKind::Mp4 => "MP4",
         ContentKind::Heic => "HEIC",
+        ContentKind::Mts => "MTS",
     }
 }

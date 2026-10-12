@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, fragments, heif, jpeg, mp4, reader::Reader};
+use crate::{Found, Kind, Status, fragments, heif, jpeg, mp4, mts, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -56,14 +56,17 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
             if at < skip_until {
                 continue;
             }
-            let head = data.get(off..off + 8).unwrap_or_default();
+            let head = data
+                .get(off..off + HEADER_LEN)
+                .or_else(|| data.get(off..))
+                .unwrap_or_default();
             let hit = if looks_like_header(head) {
                 carve_at(&mut parse, at, opts)
             } else {
                 None
             };
             if let Some(f) = hit {
-                if f.status == Status::Complete && f.fragments.len() == 1 {
+                if f.covers_its_span() {
                     skip_until = at + f.len;
                 }
                 found.push(f);
@@ -74,13 +77,21 @@ pub fn scan<S: BlockSource + ?Sized>(src: &S, opts: &Options) -> Vec<Found> {
     found
 }
 
-/// Whether `head` (the first bytes of a sector) starts a file this crate can carve.
+/// Bytes from a sector start that [`looks_like_header`] wants (three 192-byte transport
+/// stream packets; other formats need only the first 8).
+pub const HEADER_LEN: usize = 3 * 192;
+
+/// Whether `head` (the first bytes of a sector, ideally [`HEADER_LEN`]) starts a file this
+/// crate can carve.
 pub fn looks_like_header(head: &[u8]) -> bool {
-    head.starts_with(&[0xFF, 0xD8, 0xFF]) || head.get(4..8) == Some(b"ftyp")
+    head.starts_with(&[0xFF, 0xD8, 0xFF])
+        || head.get(4..8) == Some(b"ftyp")
+        || mts::looks_like_mts(head)
 }
 
 /// Carves the file starting at `at`, if any: a JPEG (reassembled if fragmented and
-/// `opts.reassemble` is set), a HEIC image or an MP4/QuickTime file. This is what [`scan`] does at each
+/// `opts.reassemble` is set), a HEIC image, an MP4/QuickTime file or an AVCHD/BDAV
+/// transport stream. This is what [`scan`] does at each
 /// header it finds, for callers that drive the reading themselves.
 pub fn carve_at<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
@@ -88,6 +99,15 @@ pub fn carve_at<S: BlockSource + ?Sized>(
     opts: &Options,
 ) -> Option<Found> {
     let head = r.slice(at, 8)?.to_vec();
+    if r.slice(at, HEADER_LEN).is_some_and(mts::looks_like_mts) {
+        let m = mts::carve(r, at, opts.max_video)?;
+        let status = match m.status {
+            mts::Status::Complete => Status::Complete,
+            mts::Status::Corrupt { at } => Status::Corrupt { at },
+            mts::Status::Truncated => Status::Truncated,
+        };
+        return Some(Found::contiguous(at, m.len, Kind::Mts, status));
+    }
     if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
         let j = jpeg::carve(r, at, opts.max_jpeg)?;
         let status = match j.status {
