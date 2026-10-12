@@ -7,12 +7,14 @@
 //! - [`naive`]: the minimal baseline (SOI to the first EOI), kept for comparison
 //! - [`reader`]: a windowed reader over a [`blocksource::BlockSource`]
 
+pub mod avi;
 pub mod fragments;
 pub mod heif;
 pub mod jpeg;
 pub mod mp4;
 pub mod mts;
 pub mod naive;
+pub mod pieces;
 pub mod reader;
 pub mod scan;
 
@@ -51,11 +53,12 @@ impl Found {
     }
 
     /// The fragments that surely belong to this file, so a scan need not look for other
-    /// files' headers inside them: those of a complete contiguous file, or of a transport
-    /// stream (whose packets repeat table headers throughout, broken or not).
+    /// files' headers inside them: those of a complete contiguous file, of a transport
+    /// stream (whose packets repeat table headers throughout, broken or not), or the
+    /// checked part of an AVI file (whose Motion JPEG frames are JPEG files of their own).
     pub fn claimed(&self) -> &[(u64, u64)] {
         let single = self.fragments.len() == 1 && self.status == Status::Complete;
-        if single || self.kind == Kind::Mts {
+        if single || matches!(self.kind, Kind::Mts | Kind::Avi) {
             &self.fragments
         } else {
             &[]
@@ -83,6 +86,7 @@ pub enum Kind {
     Heic,
     /// An AVCHD/BDAV transport stream (`.mts`/`.m2ts`).
     Mts,
+    Avi,
 }
 
 impl Kind {
@@ -93,6 +97,7 @@ impl Kind {
             Kind::Mov => "mov",
             Kind::Heic => "heic",
             Kind::Mts => "mts",
+            Kind::Avi => "avi",
         }
     }
 }

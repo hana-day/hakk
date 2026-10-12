@@ -1,0 +1,49 @@
+# Compact-camera movies (.AVI) fragmented on a disk without a file system, in the
+# CFReDS-style layouts. Identical on every OS.
+name = "compact-camera-fragments"
+seed = 17
+size = "192MiB"
+fs = "none"
+
+# Fragments in order, cut on 32 KiB cluster boundaries.
+[[steps]]
+op = "place"
+kind = "avi"
+count = 3
+min_size = "6MiB"
+max_size = "12MiB"
+layout = "sequential"
+fragments = [2, 4]
+align = "32KiB"
+
+# Fragments out of order.
+[[steps]]
+op = "place"
+kind = "avi"
+count = 3
+min_size = "6MiB"
+max_size = "12MiB"
+layout = "shuffled"
+fragments = [3, 4]
+align = "32KiB"
+
+# A whole movie between the two halves of another.
+[[steps]]
+op = "place"
+kind = "avi"
+count = 2
+min_size = "4MiB"
+max_size = "8MiB"
+layout = "nested"
+align = "32KiB"
+
+# Two movies whose fragments alternate.
+[[steps]]
+op = "place"
+kind = "avi"
+count = 2
+min_size = "8MiB"
+max_size = "12MiB"
+layout = "braided"
+fragments = [3, 5]
+align = "32KiB"

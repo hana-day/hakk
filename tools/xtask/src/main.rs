@@ -117,7 +117,7 @@ fn bench(args: &[String]) -> Result<()> {
                 .arg(out.join("recup"))
                 .arg("/cmd")
                 .arg(&image)
-                .arg("partition_none,fileopt,everything,disable,jpg,enable,mov,enable,m2ts,enable,wholespace,search"))?;
+                .arg("partition_none,fileopt,everything,disable,jpg,enable,mov,enable,m2ts,enable,riff,enable,wholespace,search"))?;
             let elapsed = started.elapsed().as_secs_f64();
             if Path::new("photorec.log").exists() {
                 fs::rename("photorec.log", dir.join("photorec.log"))?;

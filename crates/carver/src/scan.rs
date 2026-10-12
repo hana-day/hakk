@@ -7,7 +7,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{Found, Kind, Status, fragments, heif, jpeg, mp4, mts, reader::Reader};
+use crate::{Found, Kind, Status, avi, fragments, heif, jpeg, mp4, mts, reader::Reader};
 
 /// Scan limits.
 #[derive(Debug, Clone, Copy)]
@@ -100,7 +100,22 @@ pub const HEADER_LEN: usize = 3 * 192;
 pub fn looks_like_header(head: &[u8]) -> bool {
     head.starts_with(&[0xFF, 0xD8, 0xFF])
         || head.get(4..8) == Some(b"ftyp")
+        || avi::looks_like_avi(head)
         || mts::looks_like_mts(head)
+}
+
+/// Whether the JPEG at `at` is a Motion JPEG frame: right after an AVI frame chunk header
+/// (`##dc` or `##db`) that holds it. Frames are part of a video, not photos.
+fn in_avi_frame<S: BlockSource + ?Sized>(r: &mut Reader<S>, at: u64) -> bool {
+    let Some(head) = at.checked_sub(8).and_then(|h| r.slice(h, 8)) else {
+        return false;
+    };
+    let [a, b, c, d, s0, s1, s2, s3] = <[u8; 8]>::try_from(head).unwrap_or_default();
+    a.is_ascii_hexdigit()
+        && b.is_ascii_hexdigit()
+        && c == b'd'
+        && (d == b'c' || d == b'b')
+        && u32::from_le_bytes([s0, s1, s2, s3]) > 2
 }
 
 /// Carves the file starting at `at`, if any: a JPEG (reassembled if fragmented and
@@ -125,7 +140,28 @@ pub fn carve_at<S: BlockSource + ?Sized>(
             ..Found::contiguous(at, m.len, Kind::Mts, status)
         });
     }
+    if avi::looks_like_avi(&head) || r.slice(at, 12).is_some_and(avi::looks_like_avi) {
+        let a = avi::follow(r, at, opts.max_video, opts.reassemble.as_ref())?;
+        let status = match a.status {
+            avi::Status::Complete => Status::Complete,
+            avi::Status::Corrupt { at } => Status::Corrupt { at },
+            avi::Status::Truncated => Status::Truncated,
+        };
+        let mut found = Found {
+            fragments: a.fragments,
+            ..Found::contiguous(at, a.len, Kind::Avi, status)
+        };
+        found.has_index = Some(a.has_index);
+        if a.width > 0 && a.height > 0 {
+            found.width = Some(a.width);
+            found.height = Some(a.height);
+        }
+        return Some(found);
+    }
     if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        if in_avi_frame(r, at) {
+            return None;
+        }
         let j = jpeg::carve(r, at, opts.max_jpeg)?;
         let status = match j.status {
             jpeg::Status::Complete => Status::Complete,

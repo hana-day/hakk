@@ -3,6 +3,7 @@
 //! Every file is made so its 512-byte blocks are (nearly) unique, so that placement can be
 //! found by matching content. Compressed data and samples are therefore random bytes.
 
+mod avi;
 mod exif;
 mod heif;
 mod jpeg;
@@ -67,6 +68,8 @@ pub fn generate(
         (ContentKind::Heic, None) => bail!("heic files need a heif profile"),
         (ContentKind::Mts, None) => Ok(mts::generate(target, rng)),
         (ContentKind::Mts, Some(name)) => bail!("mts files have no profiles yet ({name:?})"),
+        (ContentKind::Avi, None) => avi::generate(target, rng),
+        (ContentKind::Avi, Some(name)) => bail!("avi files have no profiles yet ({name:?})"),
     }
 }
 
@@ -116,5 +119,6 @@ pub fn extension(kind: ContentKind) -> &'static str {
         ContentKind::Mp4 => "MP4",
         ContentKind::Heic => "HEIC",
         ContentKind::Mts => "MTS",
+        ContentKind::Avi => "AVI",
     }
 }

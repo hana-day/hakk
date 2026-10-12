@@ -155,6 +155,7 @@ pub enum ContentKind {
     Mp4,
     Heic,
     Mts,
+    Avi,
 }
 
 impl Scenario {
@@ -180,7 +181,7 @@ impl Scenario {
                 ContentKind::Jpeg => self.profiles.jpeg.contains_key(name),
                 ContentKind::Mp4 => self.profiles.video.contains_key(name),
                 ContentKind::Heic => self.profiles.heif.contains_key(name),
-                ContentKind::Mts => false,
+                ContentKind::Mts | ContentKind::Avi => false,
             };
             if !known {
                 bail!("steps[{i}]: unknown {kind:?} profile {name:?}");

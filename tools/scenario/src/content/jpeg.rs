@@ -203,7 +203,12 @@ fn encode_noise(width: u32, height: u32, quality: u8, rng: &mut Rng) -> Result<V
 }
 
 /// Encodes noise with 4:2:0 subsampling and, if given, a restart interval (in MCUs).
-fn encode_420(width: u32, height: u32, restart: Option<u16>, rng: &mut Rng) -> Result<Vec<u8>> {
+pub(super) fn encode_420(
+    width: u32,
+    height: u32,
+    restart: Option<u16>,
+    rng: &mut Rng,
+) -> Result<Vec<u8>> {
     let pixels = super::picture::picture(width, height, rng);
     let mut encoded = Vec::new();
     let mut enc = jpeg_encoder::Encoder::new(&mut encoded, 90);

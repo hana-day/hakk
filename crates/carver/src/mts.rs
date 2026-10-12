@@ -20,7 +20,7 @@
 
 use blocksource::BlockSource;
 
-use crate::{fragments, reader::Reader};
+use crate::{fragments, pieces::Pieces, reader::Reader};
 
 /// Bytes per BDAV source packet.
 pub const PACKET: u64 = 192;
@@ -101,10 +101,7 @@ pub fn follow<S: BlockSource + ?Sized>(
     if !looks_like_mts(r.slice(start, 3 * 192)?) {
         return None;
     }
-    let mut map = Map {
-        closed: Vec::new(),
-        open: (start, 0),
-    };
+    let mut map = Pieces::new(start);
     let mut state = State::default();
     // States before each of the last packets, oldest first: (logical offset, state).
     let mut history: Vec<(u64, State)> = Vec::with_capacity(HISTORY + 1);
@@ -115,7 +112,7 @@ pub fn follow<S: BlockSource + ?Sized>(
             ran_out = true;
             break;
         }
-        let Some(p) = map.packet(r, pos) else {
+        let Some(p) = packet(&map, r, pos) else {
             ran_out = true;
             break;
         };
@@ -127,7 +124,7 @@ pub fn follow<S: BlockSource + ?Sized>(
             pos += PACKET;
             continue;
         }
-        let Some(o) = join.filter(|_| map.closed.len() + 2 <= MAX_FRAGMENTS) else {
+        let Some(o) = join.filter(|_| map.count() < MAX_FRAGMENTS) else {
             break;
         };
         let ended = state.packets.is_multiple_of(UNIT);
@@ -142,10 +139,7 @@ pub fn follow<S: BlockSource + ?Sized>(
     if state.packets == 0 {
         return None;
     }
-    let mut fragments = map.closed.clone();
-    if pos > map.open.1 {
-        fragments.push((map.open.0, pos - map.open.1));
-    }
+    let fragments = map.fragments(pos);
     let status = if state.packets.is_multiple_of(UNIT) {
         Status::Complete
     } else if ran_out {
@@ -176,14 +170,14 @@ pub fn follow<S: BlockSource + ?Sized>(
 /// a similar clock; there only a candidate moving on as normal is taken.
 fn find_next<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
-    map: &Map,
+    map: &Pieces,
     history: &[(u64, State)],
     failed: u64,
     ended: bool,
     o: &fragments::Options,
-) -> Option<(Map, u64, State)> {
+) -> Option<(Pieces, u64, State)> {
     let grid = o.grid.max(SECTOR);
-    let oldest = history.first()?.0.max(map.open.1);
+    let oldest = history.first()?.0.max(map.open_from());
     let normal = history
         .iter()
         .zip(history.iter().skip(1))
@@ -195,8 +189,9 @@ fn find_next<S: BlockSource + ?Sized>(
     // each with the state before the packet it falls in.
     let mut cuts = Vec::new();
     let mut end = (map.physical(failed) + 4) / SECTOR * SECTOR;
-    while end > map.open.0 && end >= map.physical(oldest) {
-        let cut = map.open.1 + (end - map.open.0);
+    let open = map.physical(map.open_from());
+    while end > open && end >= map.physical(oldest) {
+        let cut = map.open_from() + (end - open);
         let resume = cut / PACKET * PACKET;
         if let Some(&(_, before)) = history.iter().find(|(at, _)| *at == resume) {
             cuts.push((end, cut, resume, before));
@@ -205,14 +200,14 @@ fn find_next<S: BlockSource + ?Sized>(
     }
     // The next fragment starts a whole number of clusters away from the cut. All cuts are
     // tried at each distance, so they share the data read.
-    let mut best: Option<(u32, Map, u64, State)> = None;
+    let mut best: Option<(u32, Pieces, u64, State)> = None;
     for k in 1..=JOIN_REACH.max(o.reach) / grid {
         for &(end, cut, resume, before) in &cuts {
             for to in [end.checked_add(k * grid), end.checked_sub(k * grid)] {
                 let Some(to) = to else { continue };
                 // Cheap first: the sync byte of the first packet wholly past the cut.
                 let first = cut.div_ceil(PACKET) * PACKET;
-                if map.overlaps(to, end) || r.slice(to + (first - cut) + 4, 1) != Some(&[0x47][..])
+                if map.overlaps(to, cut) || r.slice(to + (first - cut) + 4, 1) != Some(&[0x47][..])
                 {
                     continue;
                 }
@@ -236,7 +231,7 @@ fn find_next<S: BlockSource + ?Sized>(
 /// state before it: the arrival clock's step across the cut if so.
 fn carries_on<S: BlockSource + ?Sized>(
     r: &mut Reader<S>,
-    map: &Map,
+    map: &Pieces,
     resume: u64,
     cut: u64,
     mut state: State,
@@ -257,7 +252,7 @@ fn carries_on<S: BlockSource + ?Sized>(
         let new = pos + 8 > cut;
         let limit = if new { JOIN_ATS_STEP } else { MAX_ATS_STEP };
         let prev = state.last_ats;
-        let took = map.packet(r, pos).is_some_and(|p| state.take(&p, limit));
+        let took = packet(map, r, pos).is_some_and(|p| state.take(&p, limit));
         if !took {
             // A last fragment shorter than the check, ending the file.
             let ends = pos > cut && state.packets.is_multiple_of(UNIT);
@@ -274,59 +269,11 @@ fn carries_on<S: BlockSource + ?Sized>(
     across
 }
 
-/// Where the file's bytes are: closed fragments, then an open one running on.
-#[derive(Debug, Clone)]
-struct Map {
-    /// `(source offset, length)` in file order.
-    closed: Vec<(u64, u64)>,
-    /// `(source offset, logical offset)` of the open fragment.
-    open: (u64, u64),
-}
-
-impl Map {
-    /// Source offset of a logical offset in the open fragment.
-    fn physical(&self, logical: u64) -> u64 {
-        self.open.0 + logical.saturating_sub(self.open.1)
-    }
-
-    /// The map with the open fragment closed at logical offset `cut` and a new one from
-    /// source offset `to`.
-    fn cut(&self, cut: u64, to: u64) -> Self {
-        let mut closed = self.closed.clone();
-        closed.push((self.open.0, cut - self.open.1));
-        Self {
-            closed,
-            open: (to, cut),
-        }
-    }
-
-    /// Whether source offset `at` lies in the file's own data (up to `end` in the open
-    /// fragment).
-    fn overlaps(&self, at: u64, end: u64) -> bool {
-        (self.open.0..end).contains(&at)
-            || self
-                .closed
-                .iter()
-                .any(|&(o, l)| (o..o.saturating_add(l)).contains(&at))
-    }
-
-    /// The packet at logical offset `pos`, which may straddle the last cut.
-    fn packet<S: BlockSource + ?Sized>(&self, r: &mut Reader<S>, pos: u64) -> Option<[u8; 192]> {
-        let mut p = [0u8; 192];
-        if pos >= self.open.1 {
-            p.copy_from_slice(r.slice(self.physical(pos), 192)?);
-            return Some(p);
-        }
-        let &(o, l) = self.closed.last()?;
-        let before = usize::try_from(self.open.1 - pos)
-            .ok()
-            .filter(|&b| b < 192)?;
-        let from = o + l - before as u64;
-        p.get_mut(..before)?.copy_from_slice(r.slice(from, before)?);
-        p.get_mut(before..)?
-            .copy_from_slice(r.slice(self.open.0, 192 - before)?);
-        Some(p)
-    }
+/// The packet at logical offset `pos`, which may straddle a cut.
+fn packet<S: BlockSource + ?Sized>(map: &Pieces, r: &mut Reader<S>, pos: u64) -> Option<[u8; 192]> {
+    let mut p = [0u8; 192];
+    map.read(r, pos, &mut p)?;
+    Some(p)
 }
 
 /// The per-packet checks: the arrival clock and each stream's continuity counter.
