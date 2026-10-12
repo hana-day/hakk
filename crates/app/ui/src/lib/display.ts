@@ -66,6 +66,8 @@ export function tone(id: number): string {
 
 /** User-facing text for a failed request. */
 export function errorText(err: unknown): string {
-  if (isHelperError(err)) return t(`errors.${err.code}`);
-  return t('errors.internal');
+  if (!isHelperError(err)) return t('errors.internal');
+  const text = t(`errors.${err.code}`);
+  // Technical details help when reporting a problem.
+  return 'detail' in err && err.detail ? `${text}（${err.detail}）` : text;
 }

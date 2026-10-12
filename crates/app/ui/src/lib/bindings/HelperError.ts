@@ -4,4 +4,4 @@ import type { DestinationBlock } from "./DestinationBlock";
 /**
  * Errors returned by helper requests. The GUI shows a localized message per variant.
  */
-export type HelperError = { "code": "helperUnavailable", detail: string, } | { "code": "driveNotFound" } | { "code": "destinationNotFound" } | { "code": "destinationBlocked", reason: DestinationBlock, } | { "code": "scanNotFound" } | { "code": "scanEnded" } | { "code": "fileNotFound" } | { "code": "nothingRequested" } | { "code": "recoveryInProgress" } | { "code": "cannotOpen", detail: string, } | { "code": "notAvailable" } | { "code": "internal", detail: string, };
+export type HelperError = { "code": "helperUnavailable", detail: string, } | { "code": "driveNotFound" } | { "code": "destinationNotFound" } | { "code": "destinationBlocked", reason: DestinationBlock, } | { "code": "scanNotFound" } | { "code": "scanEnded" } | { "code": "fileNotFound" } | { "code": "nothingRequested" } | { "code": "recoveryInProgress" } | { "code": "cannotOpen", detail: string, } | { "code": "adminRequired" } | { "code": "notAvailable" } | { "code": "internal", detail: string, };

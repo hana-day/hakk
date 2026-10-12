@@ -135,11 +135,14 @@ impl RemoteHelper {
 
         // SAFETY: getuid and getgid cannot fail and have no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        // The helper's output goes to a log the user can read.
+        let log = log_dir().map_or_else(|| PathBuf::from("/dev/null"), |d| d.join("helper.log"));
         let command = format!(
-            "{} {SERVE_ARG} {} --owner {uid}:{gid} --data-dir {} >/dev/null 2>&1 &",
+            "{} {SERVE_ARG} {} --owner {uid}:{gid} --data-dir {} >>{} 2>&1 &",
             shell_quote(&exe.to_string_lossy()),
             shell_quote(&socket.to_string_lossy()),
             shell_quote(&crate::default_data_dir().to_string_lossy()),
+            shell_quote(&log.to_string_lossy()),
         );
         let script = format!(
             "do shell script \"{}\" with prompt \"{}\" with administrator privileges",
@@ -309,6 +312,14 @@ impl Helper for RemoteHelper {
     fn repair(&self, request: RepairRequest) -> Result<(), HelperError> {
         self.call(Call::Repair { request }).map(|_| ())
     }
+}
+
+/// The folder for the app's logs (macOS: `~/Library/Logs/hakk`), created if needed.
+pub fn log_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let dir = PathBuf::from(home).join("Library/Logs/hakk");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 /// `s` as one word for /bin/sh.

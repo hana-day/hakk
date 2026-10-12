@@ -270,15 +270,14 @@ impl State {
     fn open(&self, id: &DriveId) -> Result<Opened, HelperError> {
         if drives::is_physical(id) {
             let disk = self.disk(id)?;
-            let device = Device::open(&disk.device).map_err(|e| HelperError::CannotOpen {
-                detail: if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    format!(
-                        "{}: administrator privileges are needed",
-                        disk.device.display()
-                    )
+            let device = Device::open(&disk.device).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    HelperError::AdminRequired
                 } else {
-                    format!("{}: {e}", disk.device.display())
-                },
+                    HelperError::CannotOpen {
+                        detail: format!("{}: {e}", disk.device.display()),
+                    }
+                }
             })?;
             // Raw devices take only sector-aligned reads.
             return Ok((

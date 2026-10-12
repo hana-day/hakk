@@ -116,10 +116,40 @@ fn serve_helper() -> bool {
     false
 }
 
+/// Sends this process's error output to `~/Library/Logs/hakk/hakk.log` when it was not
+/// started from a terminal (launched from Finder, it would otherwise be lost).
+#[cfg(target_os = "macos")]
+fn log_to_file() {
+    use std::os::fd::AsRawFd;
+    // SAFETY: isatty only inspects the descriptor.
+    if unsafe { libc::isatty(2) } == 1 {
+        return;
+    }
+    let Some(dir) = hakk_helper::remote::log_dir() else {
+        return;
+    };
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("hakk.log"))
+    else {
+        return;
+    };
+    // SAFETY: both descriptors are valid; dup2 makes 2 refer to the log file, which stays
+    // open for the life of the process (the original `file` handle is leaked on purpose).
+    unsafe { libc::dup2(file.as_raw_fd(), 2) };
+    std::mem::forget(file);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn log_to_file() {}
+
 fn main() {
     if serve_helper() {
         return;
     }
+    log_to_file();
+    eprintln!("hakk {} starting", env!("CARGO_PKG_VERSION"));
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

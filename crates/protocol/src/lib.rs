@@ -481,6 +481,10 @@ pub enum HelperError {
     RecoveryInProgress,
     #[error("cannot open: {detail}")]
     CannotOpen { detail: String },
+    /// Reading the drive needs administrator privileges, which the helper does not have
+    /// (the password prompt was declined, or the helper runs inside the GUI).
+    #[error("administrator privileges are needed")]
+    AdminRequired,
     /// The helper does not offer this yet (e.g. video repair).
     #[error("not available")]
     NotAvailable,
