@@ -1,4 +1,5 @@
 <script lang="ts">
+  // The finished scan on one line.
   import type { ScanSummary } from '../../lib/bindings/ScanSummary';
   import { formatCount, formatElapsed } from '../../lib/format';
   import { t } from '../../lib/i18n';
@@ -8,49 +9,33 @@
 </script>
 
 <section aria-label={t('summary.label')} class="panel">
-  <div class="head">
-    <span class="mark"><Icon name="check" size={22} stroke={2.6} /></span>
-    <div class="text">
-      <span class="title">{summary.cancelled ? t('summary.cancelled') : t('summary.finished')}</span>
-      <span class="sub">{t('summary.found', { photos: summary.photos, videos: summary.videos })}</span>
-    </div>
-  </div>
-  <div class="stats">
-    <div class="stat">
-      <span class="stat-label">{t('summary.recoverable')}</span>
-      <span class="num value">{formatCount(summary.recoverable)}</span>
-    </div>
-    <div class="stat">
-      <span class="stat-label">{t('summary.partiallyDamaged')}</span>
-      <span class="num value">{formatCount(summary.partiallyDamaged)}</span>
-    </div>
-    <div class="stat">
-      <span class="stat-label">{t('summary.elapsed')}</span>
-      <span class="num value">{formatElapsed(summary.elapsedSeconds)}</span>
-    </div>
-    <div class="stat">
-      <span class="stat-label">{t('summary.readErrors')}</span>
-      <span class="num value">{t('summary.readErrorsValue', { count: summary.readErrors })}</span>
-    </div>
-  </div>
+  <span class="mark"><Icon name="check" size={14} stroke={3} /></span>
+  <span class="title">{summary.cancelled ? t('summary.cancelled') : t('summary.finished')}</span>
+  <span class="stats">
+    <span>{t('summary.recoverable')} <span class="num">{formatCount(summary.recoverable)}</span></span>
+    <span>{t('summary.partiallyDamaged')} <span class="num">{formatCount(summary.partiallyDamaged)}</span></span>
+    <span>{t('summary.elapsed')} <span class="num">{formatElapsed(summary.elapsedSeconds)}</span></span>
+    <span class:errors={summary.readErrors > 0}>
+      {t('summary.readErrors')} <span class="num">{t('summary.readErrorsValue', { count: summary.readErrors })}</span>
+    </span>
+  </span>
 </section>
 
 <style>
   .panel {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    padding: 10px 24px;
     background: var(--surface);
     border-bottom: 1px solid var(--line);
-    padding: 20px 24px;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px 32px;
+    font-size: 13px;
   }
-  .head { display: flex; align-items: center; gap: 14px; }
   .mark {
     flex: none;
-    width: 44px;
-    height: 44px;
+    width: 22px;
+    height: 22px;
     border-radius: 50%;
     background: var(--brand-soft);
     color: var(--brand);
@@ -58,9 +43,8 @@
     align-items: center;
     justify-content: center;
   }
-  .text { display: flex; flex-direction: column; gap: 4px; }
-  .title { font-size: 20px; font-weight: 700; }
-  .sub { font-size: 14px; color: var(--text-3); }
-  .stats { display: flex; flex-wrap: wrap; gap: 10px; }
-  .value { font-size: 18px; }
+  .title { font-size: 14px; font-weight: 700; }
+  .stats { display: inline-flex; flex-wrap: wrap; gap: 4px 18px; color: var(--text-2); }
+  .num { font-weight: 700; color: var(--text); }
+  .errors .num { color: var(--danger, #b2402b); }
 </style>

@@ -66,8 +66,7 @@ export const ja = {
     remainingUnderMinute: '残り1分未満',
     remainingUnknown: '残り時間を計算中',
     rate: '{rate}/秒',
-    photos: '写真',
-    videos: '動画',
+    readErrors: '読み取りエラー {count} か所',
   },
   diskMap: {
     label: 'ディスクマップ：先頭から{percent}%まで読み取り済み',
